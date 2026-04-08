@@ -2,18 +2,19 @@ import {contextBridge} from 'electron';
 const { ipcRenderer } = require('electron');
 
 const apiKey = 'electron';
-let imageDownloadhandle;
-ipcRenderer.on('imageDownloadDone', (event, state) => {
-  imageDownloadhandle && imageDownloadhandle(state);
-});
+
 /**
+ * Promise 化的 API 接口
+ * 解决事件监听器累积导致的内存泄漏问题
  * @see https://github.com/electron/electron/issues/21437#issuecomment-573522360
  */
 const api = {
   versions: process.versions,
-  ipcRenderer: { ...ipcRenderer },
-  imageDownloadDone: (callback) => {
-    imageDownloadhandle = callback;
+  ipcRenderer: {
+    invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
+    send: (channel, ...args) => ipcRenderer.send(channel, ...args),
+    on: (channel, listener) => ipcRenderer.on(channel, listener),
+    removeListener: (channel, listener) => ipcRenderer.removeListener(channel, listener),
   },
 };
 

@@ -7,15 +7,22 @@ export class ClipImage {
       width: 256,
       height: 256,
     };
+    this.map = null;
+    this.vectorLayer = null;
+    this.dom = null;
     this.createMap();
   }
+
   setSize(width, height) {
     if (this.tileSize.width === width && this.tileSize.height === height) return;
     this.tileSize.width = width;
     this.tileSize.height = height;
-    this.dom.style.width = width + 'px';
-    this.dom.style.height = height + 'px';
+    if (this.dom) {
+      this.dom.style.width = width + 'px';
+      this.dom.style.height = height + 'px';
+    }
   }
+
   createMap() {
     if (this.map) return;
     const dom = document.createElement('div');
@@ -52,14 +59,40 @@ export class ClipImage {
       forceRenderOnRotating: true,
     }).addTo(map);
   }
+
+  /**
+   * 清理地图实例和相关资源
+   * 解决地图实例内存累积问题
+   */
+  cleanup() {
+    if (this.vectorLayer) {
+      this.vectorLayer.clear();
+      this.vectorLayer = null;
+    }
+    if (this.map) {
+      this.map.remove();
+      this.map = null;
+    }
+    if (this.dom && this.dom.parentNode) {
+      this.dom.parentNode.removeChild(this.dom);
+      this.dom = null;
+    }
+  }
+
+  /**
+   * 重建地图实例
+   * 用于长时间下载过程中定期清理内存
+   */
+  recreate() {
+    this.cleanup();
+    this.createMap();
+  }
+
   addTempGeometry(intersection, rect) {
+    if (!this.vectorLayer) {
+      this.createMap();
+    }
     this.vectorLayer.clear();
-    // const polygon = new maptalks.Polygon(intersection.geometry.coordinates, {
-    //   symbol: {
-    //     'lineWidth' : 0,
-    //     'polygonFill' : 'rgb(0,0,0)',
-    //   },
-    // });
     const polygon = maptalks.GeoJSON.toGeometry(intersection);
     this.vectorLayer.addGeometry(polygon);
     const extent = new maptalks.Polygon(rect.geometry.coordinates, {
@@ -74,17 +107,14 @@ export class ClipImage {
     const center = extent.getCenter();
     this.map.setCenterAndZoom(center, zoom);
   }
+
   getImage(imageType) {
     return new Promise(resolve => {
-      // setTimeout(() => {
-      //   const img = this.map.toDataURL({
-      //     'mimeType' : 'image/' + imageType,
-      //     'save' : false,
-      //   });
-      //   resolve(img);
-      // }, 100);
-
       const isComplete = () => {
+        if (!this.map) {
+          resolve(null);
+          return;
+        }
         const over = !this.map.isMoving() && !this.map.isZooming() && !this.map.isAnimating();
         if (!over) {
           requestAnimationFrame(isComplete);
