@@ -41,6 +41,63 @@ const TEMP_POINT3 = new Point(0, 0);
 
 import { downloadImage, downloadController } from './download';
 import { progressAddSuccess, progressAddError } from './progress';
+import { getFailedTilesManager } from './failedTilesManager';
+
+let currentFailedTaskId = null;
+let failedTilesQueue = [];
+
+async function recordFailedTile(tileData, downloadOption) {
+  if (!currentFailedTaskId) return;
+
+  const record = {
+    taskId: currentFailedTaskId,
+    tileUrl: tileData.url || null,
+    layers: tileData.layers || null,
+    savePath: downloadOption.downloadPath
+      ? `${downloadOption.downloadPath}${tileData.z}/${tileData.x}/${tileData.y}${downloadOption.pictureType || '.png'}`
+      : null,
+    x: tileData.x,
+    y: tileData.y,
+    z: tileData.z,
+    retryCount: 0,
+    downloadType: tileData.layers ? 'merge' : 'normal',
+    clipData: downloadOption.clipImage ? {
+      relation: 1,
+    } : null,
+  };
+
+  failedTilesQueue.push(record);
+
+  const manager = getFailedTilesManager();
+  manager.addFailedTilesBatch([record]);
+}
+
+async function flushFailedTiles() {
+  if (failedTilesQueue.length === 0) return;
+
+  const manager = getFailedTilesManager();
+  await manager.flushWriteQueue();
+}
+
+export { flushFailedTiles };
+
+export function setCurrentFailedTaskId(taskId) {
+  currentFailedTaskId = taskId;
+  failedTilesQueue = [];
+}
+
+export function getCurrentFailedTaskId() {
+  return currentFailedTaskId;
+}
+
+export function clearCurrentFailedTaskId() {
+  currentFailedTaskId = null;
+  failedTilesQueue = [];
+}
+
+export function getFailedTilesCount() {
+  return failedTilesQueue.length;
+}
 
 // 下载瓦片
 maptalks.TileLayer.prototype.downloadCascadeTiles = async function(z, downloadOption) {
@@ -263,12 +320,13 @@ maptalks.TileLayer.prototype.downloadTiles = async function(tileZoom, containerE
                   progressAddSuccess();
                 } else {
                   progressAddError();
+                  if (tiles[0]) {
+                    recordFailedTile(tiles[0], downloadOption);
+                  }
                 }
               } else {
                   if (!tileInfo) {
                       tileInfo = {
-                          //reserve point caculated by tileConfig
-                          //so add offset because we have p._sub(offset) and p._add(dx, dy) if hasOffset
                           'z': z,
                           'x': idx.x,
                           'y': idx.y,
@@ -292,6 +350,7 @@ maptalks.TileLayer.prototype.downloadTiles = async function(tileZoom, containerE
                     progressAddSuccess();
                   } else {
                     progressAddError();
+                    recordFailedTile(tileInfo, downloadOption);
                   }
                   extent._combine(tileExtent);
               }

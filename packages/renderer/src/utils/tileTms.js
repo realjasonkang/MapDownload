@@ -1,5 +1,4 @@
 // 瓦片转换
-import { setState } from './progress';
 import { downloadLoop } from './download';
 
 function long2tile(lon, zoom) {
@@ -59,7 +58,7 @@ export class TileTMS {
         for (let y = minLat; y < maxLat; y++) {
           const str3 = this.tileLayer.getTileUrl(x, y, z);
           const path2 = temppath + '/' + y + pictureType;
-          list.push({zoom: z, url:str3, savePath:path2});
+          list.push({zoom: z, url:str3, savePath:path2, x, y, z, downloadType: 'normal'});
         }
       }
     }
@@ -116,7 +115,7 @@ export class TileTMSList {
         for (let y = minLat; y < maxLat; y++) {
           const str3 = layer.getTileUrl(x, y, z);
           const path2 = temppath + '/' + y + pictureType;
-          list.push({zoom: z, url:str3, savePath:path2});
+          list.push({zoom: z, url:str3, savePath:path2, x, y, z, downloadType: 'normal'});
         }
       }
     }
@@ -168,7 +167,7 @@ export class TileTMSListMerge {
         for (let y = minLat; y < maxLat; y++) {
           const str3 = layers.map(ll => {return {url: ll.getTileUrl(x, y, z), isLabel: ll.config().style.includes('_Label')};});
           const path2 = temppath + '/' + y + pictureType;
-          list.push({zoom: z, layers:str3, savePath:path2});
+          list.push({zoom: z, layers:str3, savePath:path2, x, y, z, downloadType: 'merge'});
         }
       }
     }

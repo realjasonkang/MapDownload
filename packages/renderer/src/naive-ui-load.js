@@ -15,6 +15,11 @@ import {
   NTree,
   NSpin,
   NSelect,
+  NDataTable,
+  NEmpty,
+  NTag,
+  NPopconfirm,
+  NSpace,
 } from 'naive-ui';
 
 const naive = create({
@@ -32,6 +37,11 @@ const naive = create({
     NTree,
     NSpin,
     NSelect,
+    NDataTable,
+    NEmpty,
+    NTag,
+    NPopconfirm,
+    NSpace,
   ],
 });
 

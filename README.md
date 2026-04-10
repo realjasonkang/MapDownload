@@ -14,6 +14,8 @@
 
 > V0.42版本win-unpacked压缩包 百度网盘链接：https://pan.baidu.com/s/1M12KnC8bIvyHo3ik3hxy9A   提取码：9986
 
+> 下载任务支持暂停、恢复、取消，支持失败任务重试和管理（收集任务失败瓦片，重新下载） V0.48
+
 ![image](https://user-images.githubusercontent.com/14800641/154039927-e8994f36-523b-40cb-b184-46a7d8e1a9f2.png)
 
 
@@ -104,7 +106,6 @@ var map = new maptalks.Map('map', {
 # TODO
 + 自定义图层加载、下载，支持上传geojson作为下载范围
 + 瓦片拼接大图
-+ [断点续传](https://github.com/Hxy1992/MapDownload/issues/27)
 
 如果该项目对你有帮助，麻烦给个star！欢迎提PR！
 

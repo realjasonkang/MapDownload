@@ -29,6 +29,13 @@
     </div>
     <div class="controls">
       <button
+        v-if="showRetryButton"
+        class="retry-btn"
+        @click="handleRetry"
+      >
+        重试失败({{ failedCount }})
+      </button>
+      <button
         v-if="!isPaused"
         :disabled="!isDownloading"
         @click="handlePause"
@@ -57,13 +64,15 @@
 
 <script >
 import { defineComponent } from 'vue';
-import { setProgressDom, showProgress, setStatusCallback, removeStatusCallback } from '../utils/progress';
+import { setProgressDom, showProgress, setStatusCallback, removeStatusCallback, getProgress } from '../utils/progress';
 import {
   pauseDownload,
   resumeDownload,
   cancelDownload,
   getDownloadStatus,
+  retryFailedTask,
 } from '../utils/download';
+import { getFailedTilesManager } from '../utils/failedTilesManager';
 
 export default defineComponent({
   name: 'ProgressControl',
@@ -72,6 +81,8 @@ export default defineComponent({
       isPaused: false,
       isDownloading: false,
       memoryUsage: null,
+      failedCount: 0,
+      showRetryButton: false,
     };
   },
   computed: {
@@ -116,6 +127,27 @@ export default defineComponent({
     handleCancel() {
       cancelDownload();
     },
+    async handleRetry() {
+      if (this.isDownloading) {
+        window.$message.warning('下载任务执行中，请稍后重试');
+        return;
+      }
+      try {
+        const manager = getFailedTilesManager();
+        await manager.init();
+        const tasks = await manager.getAllFailedTasks();
+        if (tasks.length === 0) {
+          window.$message.warning('没有需要重试的失败记录');
+          this.showRetryButton = false;
+          return;
+        }
+        const latestTask = tasks[0];
+        await retryFailedTask(latestTask);
+      } catch (error) {
+        console.error('重试下载失败:', error);
+        window.$message.error('重试下载失败');
+      }
+    },
     checkStatus() {
       const status = getDownloadStatus();
       this.isDownloading = status.isDownloading;
@@ -128,12 +160,22 @@ export default defineComponent({
     onStatusChange(status) {
       if (status.downloading !== undefined) {
         this.isDownloading = status.downloading;
+        if (!status.downloading) {
+          const progress = getProgress();
+          this.failedCount = progress.error || 0;
+          this.showRetryButton = this.failedCount > 0;
+        } else {
+          this.showRetryButton = false;
+        }
       }
       if (status.queueStatus) {
         this.isPaused = status.queueStatus.paused;
       }
       if (status.memoryUsage) {
         this.memoryUsage = status.memoryUsage;
+      }
+      if (status.failedCount !== undefined) {
+        this.failedCount = status.failedCount;
       }
     },
   },
@@ -186,6 +228,14 @@ export default defineComponent({
       &:disabled {
         opacity: 0.5;
         cursor: not-allowed;
+      }
+    }
+    .retry-btn {
+      background-color: #d03050;
+      color: white;
+      border: none;
+      &:hover {
+        background-color: #b02846;
       }
     }
   }

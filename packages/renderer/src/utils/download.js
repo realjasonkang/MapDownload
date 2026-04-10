@@ -5,11 +5,14 @@ import { ClipImage } from './clipImage';
 import { DownloadQueue } from './downloadQueue';
 import { MemoryMonitor } from './memoryMonitor';
 import { TaskManager } from './taskManager';
+import { getFailedTilesManager } from './failedTilesManager';
 
 let currentQueue = null;
 let currentTaskId = null;
+let currentFailedTaskId = null;
 let memoryMonitor = null;
 let taskManager = null;
+let failedTilesManager = null;
 let downloadController = {
   cancelled: false,
   paused: false,
@@ -47,6 +50,13 @@ function getMemoryMonitor() {
     });
   }
   return memoryMonitor;
+}
+
+function getFailedManager() {
+  if (!failedTilesManager) {
+    failedTilesManager = getFailedTilesManager();
+  }
+  return failedTilesManager;
 }
 
 export function cancelDownload() {
@@ -109,7 +119,7 @@ export function getDownloadStatus() {
   };
 }
 
-export function downloadLoop(list, apiDownload, taskConfig = null) {
+export function downloadLoop(list, apiDownload, taskConfig = null, onTileFailed = null) {
   downloadController.cancelled = false;
   downloadController.paused = false;
 
@@ -130,6 +140,7 @@ export function downloadLoop(list, apiDownload, taskConfig = null) {
   }
 
   const statistics = { success: 0, error: 0, percentage: 0, count: length };
+  const failedTiles = [];
 
   if (taskConfig) {
     const task = getTaskManager().createTask({
@@ -159,7 +170,7 @@ export function downloadLoop(list, apiDownload, taskConfig = null) {
         });
       }
     },
-    onComplete: (stats) => {
+    onComplete: async (stats) => {
       statistics.success = stats.success;
       statistics.error = stats.error;
       statistics.percentage = 100;
@@ -179,14 +190,23 @@ export function downloadLoop(list, apiDownload, taskConfig = null) {
         memoryMonitor.stop();
       }
 
+      if (failedTiles.length > 0 && currentFailedTaskId) {
+        await getFailedManager().flushWriteQueue();
+        await getFailedManager().updateFailedTask(currentFailedTaskId, {
+          failedCount: failedTiles.length,
+          successCount: stats.success,
+        });
+      }
+
       if (stats.cancelled) {
         window.$message.info(`下载已取消。已完成${stats.success}，失败${stats.error}`);
       } else {
         window.$message.success(`下载完成。下载成功${stats.success}，下载失败${stats.error}`);
       }
 
-      notifyStatusChange({ downloading: false, queueStatus: null });
+      notifyStatusChange({ downloading: false, queueStatus: null, failedCount: stats.error });
       currentQueue = null;
+      currentFailedTaskId = null;
     },
     onTaskComplete: () => {
       clipImageCounter++;
@@ -194,19 +214,44 @@ export function downloadLoop(list, apiDownload, taskConfig = null) {
         CLIPIMAGE.recreate();
       }
     },
+    onTaskFailed: (tileData) => {
+      if (tileData && currentFailedTaskId) {
+        failedTiles.push(tileData);
+        getFailedManager().addFailedTilesBatch([{
+          ...tileData,
+          taskId: currentFailedTaskId,
+        }]);
+      }
+      if (onTileFailed) {
+        onTileFailed(tileData);
+      }
+    },
   });
 
   const tasks = list.map((item) => ({
     handler: () => apiDownload(item),
+    tileData: item,
   }));
 
   currentQueue.add(tasks);
   setState(true);
   getMemoryMonitor().start();
+
+  if (taskConfig) {
+    currentFailedTaskId = getFailedManager().generateTaskId();
+    getFailedManager().createFailedTask({
+      taskId: currentFailedTaskId,
+      taskConfig,
+      totalTiles: length,
+    }).catch((err) => {
+      console.error('创建失败任务记录失败:', err);
+    });
+  }
+
   currentQueue.start();
 }
 
-export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry, imageType, taskConfig = null) {
+export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry, imageType, taskConfig = null, onTileFailed = null) {
   downloadController.cancelled = false;
   downloadController.paused = false;
 
@@ -233,6 +278,7 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
   const code = prj.code;
 
   const statistics = { success: 0, error: 0, percentage: 0, count: length };
+  const failedTiles = [];
 
   if (taskConfig) {
     const task = getTaskManager().createTask({
@@ -263,7 +309,7 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
         });
       }
     },
-    onComplete: (stats) => {
+    onComplete: async (stats) => {
       statistics.success = stats.success;
       statistics.error = stats.error;
       statistics.percentage = 100;
@@ -285,19 +331,40 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
 
       CLIPIMAGE.cleanup();
 
+      if (failedTiles.length > 0 && currentFailedTaskId) {
+        await getFailedManager().flushWriteQueue();
+        await getFailedManager().updateFailedTask(currentFailedTaskId, {
+          failedCount: failedTiles.length,
+          successCount: stats.success,
+        });
+      }
+
       if (stats.cancelled) {
         window.$message.info(`下载已取消。已完成${stats.success}，失败${stats.error}`);
       } else {
         window.$message.success(`下载完成。下载成功${stats.success}，下载失败${stats.error}`);
       }
 
-      notifyStatusChange({ downloading: false, queueStatus: null });
+      notifyStatusChange({ downloading: false, queueStatus: null, failedCount: stats.error });
       currentQueue = null;
+      currentFailedTaskId = null;
     },
     onTaskComplete: () => {
       clipImageCounter++;
       if (clipImageCounter % CLIPIMAGE_RECREATE_INTERVAL === 0) {
         CLIPIMAGE.recreate();
+      }
+    },
+    onTaskFailed: (tileData) => {
+      if (tileData && currentFailedTaskId) {
+        failedTiles.push(tileData);
+        getFailedManager().addFailedTilesBatch([{
+          ...tileData,
+          taskId: currentFailedTaskId,
+        }]);
+      }
+      if (onTileFailed) {
+        onTileFailed(tileData);
       }
     },
   });
@@ -326,11 +393,24 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
       }
       return false;
     },
+    tileData: item,
   }));
 
   currentQueue.add(tasks);
   setState(true);
   getMemoryMonitor().start();
+
+  if (taskConfig) {
+    currentFailedTaskId = getFailedManager().generateTaskId();
+    getFailedManager().createFailedTask({
+      taskId: currentFailedTaskId,
+      taskConfig,
+      totalTiles: length,
+    }).catch((err) => {
+      console.error('创建失败任务记录失败:', err);
+    });
+  }
+
   currentQueue.start();
 }
 
@@ -410,6 +490,162 @@ async function _downloadClipImage(tile, downloadOption) {
     }
   }
 
+  return false;
+}
+
+/**
+ * 重试下载失败瓦片
+ * @param {Object} task 失败任务对象
+ * @returns {Promise<void>}
+ */
+export async function retryFailedTask(task) {
+  if (getState()) {
+    window.$message.warning('下载任务执行中，请稍后重试');
+    return;
+  }
+
+  const manager = getFailedManager();
+  await manager.init();
+
+  const tiles = await manager.getFailedTilesByTaskId(task.taskId);
+  if (tiles.length === 0) {
+    window.$message.warning('没有需要重试的瓦片');
+    return;
+  }
+
+  downloadController.cancelled = false;
+  downloadController.paused = false;
+
+  const statistics = { success: 0, error: 0, percentage: 0, count: tiles.length };
+  const successTileIds = [];
+  const stillFailedTiles = [];
+
+  currentFailedTaskId = task.taskId;
+
+  currentQueue = new DownloadQueue({
+    concurrency: 5,
+    onProgress: (stats) => {
+      statistics.success = stats.success;
+      statistics.error = stats.error;
+      statistics.percentage = stats.percentage;
+      setProgress(statistics);
+    },
+    onComplete: async (stats) => {
+      statistics.success = stats.success;
+      statistics.error = stats.error;
+      statistics.percentage = 100;
+      setProgress(statistics);
+      setState(false);
+
+      if (memoryMonitor) {
+        memoryMonitor.stop();
+      }
+
+      if (successTileIds.length > 0) {
+        await manager.removeFailedTilesBatch(successTileIds);
+      }
+
+      if (stillFailedTiles.length > 0) {
+        for (const tile of stillFailedTiles) {
+          await manager.updateOrAddFailedTile({
+            ...tile,
+            taskId: task.taskId,
+            retryCount: (tile.retryCount || 0) + 1,
+          });
+        }
+      }
+
+      await manager.updateFailedTask(task.taskId, {
+        failedCount: stillFailedTiles.length,
+        successCount: (task.successCount || 0) + stats.success,
+      });
+
+      if (stats.cancelled) {
+        window.$message.info(`重试已取消。已完成${stats.success}，失败${stats.error}`);
+      } else if (stats.error === 0) {
+        window.$message.success(`重试完成。全部成功${stats.success}`);
+        await manager.deleteFailedTask(task.taskId);
+      } else {
+        window.$message.success(`重试完成。成功${stats.success}，失败${stats.error}`);
+      }
+
+      notifyStatusChange({ downloading: false, queueStatus: null, failedCount: stats.error });
+      currentQueue = null;
+      currentFailedTaskId = null;
+    },
+    onTaskFailed: (tileData) => {
+      if (tileData) {
+        stillFailedTiles.push(tileData);
+      }
+    },
+  });
+
+  const tasks = tiles.map((tile) => ({
+    handler: async () => {
+      const success = await retryDownloadTile(tile);
+      if (success) {
+        successTileIds.push(tile.id);
+      }
+      return success;
+    },
+    tileData: tile,
+  }));
+
+  currentQueue.add(tasks);
+  setState(true);
+  getMemoryMonitor().start();
+  currentQueue.start();
+}
+
+/**
+ * 重试下载单个瓦片
+ * @param {Object} tile 瓦片数据
+ * @returns {Promise<boolean>}
+ */
+async function retryDownloadTile(tile) {
+  try {
+    const ensureDir = (savePath) => {
+      const lastSlash = Math.max(savePath.lastIndexOf('/'), savePath.lastIndexOf('\\'));
+      if (lastSlash > 0) {
+        const dirPath = savePath.substring(0, lastSlash);
+        window.electron.ipcRenderer.send('ensure-dir', dirPath);
+      }
+    };
+
+    if (tile.downloadType === 'merge' && tile.layers) {
+      ensureDir(tile.savePath);
+      const param = {
+        layers: tile.layers,
+        savePath: tile.savePath,
+      };
+      const result = await window.electron.ipcRenderer.invoke('save-image-merge', param);
+      return result.success;
+    } else if (tile.downloadType === 'clip' && tile.clipData) {
+      if (tile.clipData.relation === 1) {
+        ensureDir(tile.savePath);
+        const param = { zoom: tile.z, url: tile.tileUrl, savePath: tile.savePath, x: tile.x, y: tile.y };
+        const result = await window.electron.ipcRenderer.invoke('save-image', param);
+        return result.success;
+      } else if (tile.clipData.relation === 2) {
+        return true;
+      } else if (tile.clipData.relation === 3) {
+        ensureDir(tile.savePath);
+        CLIPIMAGE.addTempGeometry(tile.clipData.intersection, tile.clipData.rect);
+        const imageBuffer = await CLIPIMAGE.getImage('png');
+        const param = { zoom: tile.z, url: tile.tileUrl, savePath: tile.savePath, x: tile.x, y: tile.y, imageBuffer };
+        const result = await window.electron.ipcRenderer.invoke('save-image', param);
+        return result.success;
+      }
+    } else {
+      ensureDir(tile.savePath);
+      const param = { zoom: tile.z, url: tile.tileUrl, savePath: tile.savePath, x: tile.x, y: tile.y };
+      const result = await window.electron.ipcRenderer.invoke('save-image', param);
+      return result.success;
+    }
+  } catch (error) {
+    console.error('重试下载瓦片错误:', error);
+    return false;
+  }
   return false;
 }
 

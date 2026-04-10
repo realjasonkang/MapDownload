@@ -11,12 +11,14 @@ export class DownloadQueue {
    * @param {Function} options.onProgress 进度回调
    * @param {Function} options.onComplete 完成回调
    * @param {Function} options.onTaskComplete 单个任务完成回调
+   * @param {Function} options.onTaskFailed 单个任务失败回调
    */
   constructor(options = {}) {
     this.concurrency = options.concurrency || 5;
     this.onProgress = options.onProgress || (() => {});
     this.onComplete = options.onComplete || (() => {});
     this.onTaskComplete = options.onTaskComplete || (() => {});
+    this.onTaskFailed = options.onTaskFailed || (() => {});
 
     this.queue = [];
     this.active = 0;
@@ -147,10 +149,16 @@ export class DownloadQueue {
           this.statistics.success++;
         } else {
           this.statistics.error++;
+          if (task.tileData && this.onTaskFailed) {
+            this.onTaskFailed(task.tileData);
+          }
         }
       } catch (error) {
         console.error('任务执行错误:', error);
         this.statistics.error++;
+        if (task.tileData && this.onTaskFailed) {
+          this.onTaskFailed(task.tileData);
+        }
       }
 
       this.statistics.completed++;

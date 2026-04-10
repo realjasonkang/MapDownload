@@ -1,5 +1,4 @@
 // 瓦片转换
-import { setState } from './progress';
 import { downloadLoop } from './download';
 
 const LLBAND = [75, 60, 45, 30, 15, 0];
@@ -151,7 +150,7 @@ class TileBaidu {
         for (let y = minLat; y < maxLat; y++) {
           const str3 = this.tileLayer.getTileUrl(x, y, z);
           const path2 = temppath + '/' + y + pictureType;
-          list.push({ zoom: z, url: str3, savePath: path2 });
+          list.push({ zoom: z, url: str3, savePath: path2, x, y, z, downloadType: 'normal' });
         }
       }
     }

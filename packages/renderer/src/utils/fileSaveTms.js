@@ -1,7 +1,9 @@
 // 瓦片转换
-import { setState, setProgress } from './progress';
+import { setState, setProgress, notifyStatusChange } from './progress';
 import { downloadLoop, downloadClipLoop, downloadController } from './download';
 import {setMapLoading} from './baseMap.js';
+import { getFailedTilesManager } from './failedTilesManager';
+import { setCurrentFailedTaskId, clearCurrentFailedTaskId, getFailedTilesCount, flushFailedTiles } from './downloadCascadeTiles';
 
 export class TileTMS {
   constructor(data) {
@@ -11,11 +13,32 @@ export class TileTMS {
     this.imageType = data.imageType;
     this.tileLayer = data.mapConfig.tileLayer;
     this.downloadGeometry = data.downloadGeometry;
+    this.taskConfig = {
+      savePath: data.savePath,
+      minZoom: data.minZoom,
+      maxZoom: data.maxZoom,
+      imageType: data.imageType,
+      clipImage: data.clipImage,
+    };
     this.downloadTiles(data.clipImage);
   }
   async downloadTiles(clipImage) {
     downloadController.cancelled = false;
     downloadController.paused = false;
+
+    const manager = getFailedTilesManager();
+    await manager.init();
+
+    const failedTaskId = manager.generateTaskId();
+    setCurrentFailedTaskId(failedTaskId);
+
+    await manager.createFailedTask({
+      taskId: failedTaskId,
+      taskConfig: this.taskConfig,
+      totalTiles: 0,
+    }).catch((err) => {
+      console.error('创建失败任务记录失败:', err);
+    });
 
     const downloadPath = this.rootPath + '/';
     const zmin = this.minZoom;
@@ -56,11 +79,25 @@ export class TileTMS {
     setState(false);
     setMapLoading(false);
 
+    await flushFailedTiles();
+    const failedCount = getFailedTilesCount();
+    if (failedCount > 0) {
+      await manager.updateFailedTask(failedTaskId, {
+        failedCount: failedCount,
+      });
+    } else {
+      await manager.deleteFailedTask(failedTaskId);
+    }
+
+    clearCurrentFailedTaskId();
+
     if (downloadController.cancelled) {
       window.$message.info('下载已取消');
     } else {
       window.$message.success('瓦片数据下载完成。');
     }
+
+    notifyStatusChange({ downloading: false, queueStatus: null, failedCount: failedCount });
   }
 }
 
@@ -72,12 +109,34 @@ export class TileTMSList {
     this.imageType = data.imageType;
     this.tileLayer = data.mapConfig.tileLayer;
     this.downloadGeometry = data.downloadGeometry;
+    this.taskConfig = {
+      savePath: data.savePath,
+      minZoom: data.minZoom,
+      maxZoom: data.maxZoom,
+      imageType: data.imageType,
+      clipImage: data.clipImage,
+      multiLayer: true,
+    };
 
     this.downloadLayers(data);
   }
   async downloadLayers(data) {
     downloadController.cancelled = false;
     downloadController.paused = false;
+
+    const manager = getFailedTilesManager();
+    await manager.init();
+
+    const failedTaskId = manager.generateTaskId();
+    setCurrentFailedTaskId(failedTaskId);
+
+    await manager.createFailedTask({
+      taskId: failedTaskId,
+      taskConfig: this.taskConfig,
+      totalTiles: 0,
+    }).catch((err) => {
+      console.error('创建失败任务记录失败:', err);
+    });
 
     setState(true);
     const statistics = {percentage: 0, count: 100};
@@ -103,11 +162,25 @@ export class TileTMSList {
     setState(false);
     setMapLoading(false);
 
+    await flushFailedTiles();
+    const failedCount = getFailedTilesCount();
+    if (failedCount > 0) {
+      await manager.updateFailedTask(failedTaskId, {
+        failedCount: failedCount,
+      });
+    } else {
+      await manager.deleteFailedTask(failedTaskId);
+    }
+
+    clearCurrentFailedTaskId();
+
     if (downloadController.cancelled) {
       window.$message.info('下载已取消');
     } else {
       window.$message.success('瓦片数据下载完成。');
     }
+
+    notifyStatusChange({ downloading: false, queueStatus: null, failedCount: failedCount });
   }
   async downloadTiles(clipImage, tileLayer, count) {
     const downloadPath = this.rootPath + '/' + tileLayer.config().style + '/';
@@ -194,7 +267,7 @@ export class TileTMSListMerge {
               url: tile.url,
               isLabel: false,
             },
-          ], savePath, x:tile.x, y:tile.y};
+          ], savePath, x:tile.x, y:tile.y, z: tile.z, downloadType: 'merge'};
         }
       });
     }
@@ -203,10 +276,13 @@ export class TileTMSListMerge {
       tileGridsList.forEach(tileGrids => {
         for (let x = 0; x < tileGrids.tiles.length; x++) {
           const tile = tileGrids.tiles[x];
-          storeMap[`${tile.x}${tile.y}${tile.z}`].layers.push({
-            url: tile.url,
-            isLabel: true,
-          });
+          const key = `${tile.x}${tile.y}${tile.z}`;
+          if (storeMap[key]) {
+            storeMap[key].layers.push({
+              url: tile.url,
+              isLabel: true,
+            });
+          }
         }
       });
     }

@@ -49,6 +49,22 @@
       <HelpCircleOutline />
     </n-icon>
     <div class="splitline" />
+    <n-badge
+      :value="failedRecordsCount"
+      :max="99"
+      :show="failedRecordsCount > 0"
+    >
+      <n-icon
+        size="20"
+        title="失败记录"
+        style="cursor: pointer;"
+        :color="failedRecordsCount > 0 ? '#d03050' : '#333333'"
+        @click="showFailedRecords(true)"
+      >
+        <AlertCircleOutline />
+      </n-icon>
+    </n-badge>
+    <div class="splitline" />
     <area-choose
       @choose="chooseArea"
     />
@@ -71,6 +87,10 @@
       :visible="setVisible"
       @hide="showSet(false)"
     />
+    <failed-records-dialog
+      v-model:show="failedRecordsVisible"
+      @retry-task="handleRetryTask"
+    />
   </div>
   <ProgressControl />
   <tips />
@@ -90,7 +110,11 @@ import Tips from './Tips.vue';
 import {useMessage, useNotification} from 'naive-ui';
 import GridIcon from './GridIcon.vue';
 import ProgressControl from './ProgressControl.vue';
-import { CloudDownloadOutline, HelpCircleOutline, SettingsOutline, SquareOutline } from '@vicons/ionicons5';
+import FailedRecordsDialog from './FailedRecordsDialog.vue';
+import { getFailedTilesManager } from '../utils/failedTilesManager';
+import { getState } from '../utils/progress';
+import { retryFailedTask } from '../utils/download';
+import { CloudDownloadOutline, HelpCircleOutline, SettingsOutline, SquareOutline, AlertCircleOutline } from '@vicons/ionicons5';
 // eslint-disable-next-line
 let map
 export default defineComponent({
@@ -104,10 +128,12 @@ export default defineComponent({
     AreaChoose,
     GridIcon,
     ProgressControl,
+    FailedRecordsDialog,
     CloudDownloadOutline,
     HelpCircleOutline,
     SettingsOutline,
     SquareOutline,
+    AlertCircleOutline,
   },
   setup() {
     window.$message = useMessage();
@@ -128,6 +154,8 @@ export default defineComponent({
       limitMinZoom: 1,
       limitMaxZoom: 18,
       isBaidu: false,
+      failedRecordsVisible: false,
+      failedRecordsCount: 0,
     };
   },
   computed: {
@@ -135,8 +163,38 @@ export default defineComponent({
   mounted() {
     map = new baseMap('map');
     this.addMapRightClickHandle();
+    this.updateFailedRecordsCount();
+    this._failedCountTimer = setInterval(() => {
+      this.updateFailedRecordsCount();
+    }, 30000);
+  },
+  beforeUnmount() {
+    if (this._failedCountTimer) {
+      clearInterval(this._failedCountTimer);
+      this._failedCountTimer = null;
+    }
   },
   methods: {
+    async updateFailedRecordsCount() {
+      try {
+        const manager = getFailedTilesManager();
+        await manager.init();
+        this.failedRecordsCount = await manager.getFailedTasksCount();
+      } catch (error) {
+        console.error('获取失败记录数量失败:', error);
+      }
+    },
+    showFailedRecords(val) {
+      this.failedRecordsVisible = val;
+    },
+    async handleRetryTask(task) {
+      if (getState()) {
+        window.$message.warning('下载任务执行中，请稍后重试');
+        return;
+      }
+      await retryFailedTask(task);
+      await this.updateFailedRecordsCount();
+    },
     chooseLayers(data) {
       this._currentLayer = data;
       map.switchBaseLayer(data);
