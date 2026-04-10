@@ -68,11 +68,18 @@ export class DownloadQueue {
 
   /**
    * 取消队列
+   * 清空队列，但允许活跃任务继续完成
+   * 所有活跃任务完成后触发 onComplete
    */
   cancel() {
     this.cancelled = true;
     this.queue = [];
-    this.active = 0;
+    if (this.active === 0) {
+      this.onComplete({
+        ...this.statistics,
+        cancelled: this.cancelled,
+      });
+    }
   }
 
   /**
@@ -108,9 +115,25 @@ export class DownloadQueue {
    * @private
    */
   async _processNext() {
-    if (this.paused || this.cancelled) return;
+    if (this.paused) {
+      return;
+    }
+
+    if (this.cancelled) {
+      if (this.queue.length === 0 && this.active === 0) {
+        this.onComplete({
+          ...this.statistics,
+          cancelled: this.cancelled,
+        });
+      }
+      return;
+    }
+
     if (this.queue.length === 0 && this.active === 0) {
-      this.onComplete(this.statistics);
+      this.onComplete({
+        ...this.statistics,
+        cancelled: this.cancelled,
+      });
       return;
     }
 
@@ -135,12 +158,22 @@ export class DownloadQueue {
 
       this.onProgress({
         ...this.statistics,
-        percentage: this.statistics.total > 0 
+        percentage: this.statistics.total > 0
           ? Number((this.statistics.completed / this.statistics.total * 100).toFixed(2))
           : 0,
       });
 
       this.onTaskComplete(this.statistics);
+
+      if (this.cancelled && this.queue.length === 0 && this.active === 0) {
+        this.onComplete({
+          ...this.statistics,
+          cancelled: this.cancelled,
+        });
+        return;
+      }
+
+      if (this.paused) return;
 
       if (!this.paused && !this.cancelled) {
         this._processNext();

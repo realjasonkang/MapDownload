@@ -1,14 +1,11 @@
 // 瓦片转换
 import { setState, setProgress } from './progress';
-import { downloadLoop, downloadClipLoop } from './download';
+import { downloadLoop, downloadClipLoop, downloadController } from './download';
 import {setMapLoading} from './baseMap.js';
 
-/**
- * 下载TMS瓦片
- */
 export class TileTMS {
   constructor(data) {
-    this.rootPath = data.savePath; // 文件根目录
+    this.rootPath = data.savePath;
     this.maxZoom = data.maxZoom;
     this.minZoom = data.minZoom;
     this.imageType = data.imageType;
@@ -17,13 +14,13 @@ export class TileTMS {
     this.downloadTiles(data.clipImage);
   }
   async downloadTiles(clipImage) {
-    // 当前绝对路径
+    downloadController.cancelled = false;
+    downloadController.paused = false;
+
     const downloadPath = this.rootPath + '/';
-    // 下载范围
     const zmin = this.minZoom;
     const zmax = this.maxZoom + 1;
     const pictureType = '.' + this.imageType;
-    // 遍历下载
     const option = {
       downloadPath,
       pictureType,
@@ -37,6 +34,19 @@ export class TileTMS {
     const statistics = {percentage: 0, count: 100};
     setState(true);
     for (let z = zmin; z < zmax; z++) {
+      if (downloadController.cancelled) {
+        break;
+      }
+
+      while (downloadController.paused) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        if (downloadController.cancelled) {
+          break;
+        }
+      }
+
+      if (downloadController.cancelled) break;
+
       statistics.percentage = Number(((z - zmin) / (zmax - zmin) * 100).toFixed(2));
       setProgress(statistics);
       await this.tileLayer.downloadCascadeTiles(z, option);
@@ -45,16 +55,18 @@ export class TileTMS {
     setProgress(statistics);
     setState(false);
     setMapLoading(false);
-    window.$message.success('瓦片数据下载完成。');
+
+    if (downloadController.cancelled) {
+      window.$message.info('下载已取消');
+    } else {
+      window.$message.success('瓦片数据下载完成。');
+    }
   }
 }
 
-/**
- * 下载TMS瓦片集合
- */
 export class TileTMSList {
   constructor(data) {
-    this.rootPath = data.savePath; // 文件根目录
+    this.rootPath = data.savePath;
     this.maxZoom = data.maxZoom;
     this.minZoom = data.minZoom;
     this.imageType = data.imageType;
@@ -64,9 +76,25 @@ export class TileTMSList {
     this.downloadLayers(data);
   }
   async downloadLayers(data) {
+    downloadController.cancelled = false;
+    downloadController.paused = false;
+
     setState(true);
     const statistics = {percentage: 0, count: 100};
     for (let index = 0; index < data.mapConfig.tileLayer.length; index++) {
+      if (downloadController.cancelled) {
+        break;
+      }
+
+      while (downloadController.paused) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        if (downloadController.cancelled) {
+          break;
+        }
+      }
+
+      if (downloadController.cancelled) break;
+
       const layer = data.mapConfig.tileLayer[index];
       await this.downloadTiles(data.clipImage, layer, (index + 1) / (data.mapConfig.tileLayer.length) * 100);
     }
@@ -74,16 +102,18 @@ export class TileTMSList {
     setProgress(statistics);
     setState(false);
     setMapLoading(false);
-    window.$message.success('瓦片数据下载完成。');
+
+    if (downloadController.cancelled) {
+      window.$message.info('下载已取消');
+    } else {
+      window.$message.success('瓦片数据下载完成。');
+    }
   }
   async downloadTiles(clipImage, tileLayer, count) {
-    // 当前绝对路径
     const downloadPath = this.rootPath + '/' + tileLayer.config().style + '/';
-    // 下载范围
     const zmin = this.minZoom;
     const zmax = this.maxZoom + 1;
     const pictureType = '.' + this.imageType;
-    // 遍历下载
     const option = {
       downloadPath,
       pictureType,
@@ -95,6 +125,19 @@ export class TileTMSList {
       option.downloadGeometry = this.downloadGeometry;
     }
     for (let z = zmin; z < zmax; z++) {
+      if (downloadController.cancelled) {
+        break;
+      }
+
+      while (downloadController.paused) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        if (downloadController.cancelled) {
+          break;
+        }
+      }
+
+      if (downloadController.cancelled) break;
+
       const percentage = Number(((z - zmin) / (zmax - zmin) * count).toFixed(2));
       setProgress({percentage});
       await tileLayer.downloadCascadeTiles(z, option);
@@ -103,35 +146,35 @@ export class TileTMSList {
   }
 }
 
-/**
- * 下载TMS瓦片集合，合并多张瓦片
- */
- export class TileTMSListMerge {
+export class TileTMSListMerge {
   constructor(data, apiDownload, apiEnsureDirSync) {
-    this.rootPath = data.savePath; // 文件根目录
+    this.rootPath = data.savePath;
     this.maxZoom = data.maxZoom;
     this.minZoom = data.minZoom;
     this.mapExtent = data.extent;
     this.imageType = data.imageType;
     this.apiEnsureDirSync = apiEnsureDirSync;
     this.tileLayer = data.mapConfig.tileLayer;
-    setState(true);
 
     const list = this.calcTiles();
+    const taskConfig = {
+      savePath: data.savePath,
+      minZoom: data.minZoom,
+      maxZoom: data.maxZoom,
+      imageType: data.imageType,
+      mergeLayers: true,
+    };
+
     if (data.clipImage) {
-      downloadClipLoop(list, apiDownload, this.tileLayer[0], data.downloadGeometry, this.imageType);
+      downloadClipLoop(list, apiDownload, this.tileLayer[0], data.downloadGeometry, this.imageType, taskConfig);
     } else {
-      downloadLoop(list, apiDownload);
+      downloadLoop(list, apiDownload, taskConfig);
     }
   }
   calcTiles() {
-    // 当前绝对路径
     const downloadPath = this.rootPath + '/';
-
-    // 下载范围
     const zmin = this.minZoom;
     const zmax = this.maxZoom + 1;
-    // 下载地址
     const pictureType = '.' + this.imageType;
 
     const imgLyr = this.tileLayer.find(t => { return !t.config().style.includes('_Label'); });

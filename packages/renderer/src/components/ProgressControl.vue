@@ -21,21 +21,74 @@
         class="error"
       />
     </div>
-    <button @click="closeProgress">
-      关闭
-    </button>
+    <div
+      v-if="memoryUsage"
+      class="item memory"
+    >
+      内存:<span :class="memoryClass">{{ memoryText }}</span>
+    </div>
+    <div class="controls">
+      <button
+        v-if="!isPaused"
+        :disabled="!isDownloading"
+        @click="handlePause"
+      >
+        暂停
+      </button>
+      <button
+        v-else
+        :disabled="!isDownloading"
+        @click="handleResume"
+      >
+        恢复
+      </button>
+      <button
+        :disabled="!isDownloading"
+        @click="handleCancel"
+      >
+        取消
+      </button>
+      <button @click="closeProgress">
+        关闭
+      </button>
+    </div>
   </div>
 </template>
 
 <script >
-import {defineComponent} from 'vue';
-import { setProgressDom, showProgress } from '../utils/progress';
+import { defineComponent } from 'vue';
+import { setProgressDom, showProgress, setStatusCallback, removeStatusCallback } from '../utils/progress';
+import {
+  pauseDownload,
+  resumeDownload,
+  cancelDownload,
+  getDownloadStatus,
+} from '../utils/download';
 
 export default defineComponent({
   name: 'ProgressControl',
   data() {
     return {
+      isPaused: false,
+      isDownloading: false,
+      memoryUsage: null,
     };
+  },
+  computed: {
+    memoryText() {
+      if (!this.memoryUsage) return '';
+      const usedMB = Math.round(this.memoryUsage.usedJSHeapSize / 1024 / 1024);
+      const limitMB = Math.round(this.memoryUsage.jsHeapSizeLimit / 1024 / 1024);
+      const percent = Math.round(this.memoryUsage.usageRatio * 100);
+      return `${usedMB}MB / ${limitMB}MB (${percent}%)`;
+    },
+    memoryClass() {
+      if (!this.memoryUsage) return '';
+      const ratio = this.memoryUsage.usageRatio;
+      if (ratio >= 0.85) return 'memory-critical';
+      if (ratio >= 0.7) return 'memory-warning';
+      return 'memory-normal';
+    },
   },
   mounted() {
     setProgressDom({
@@ -44,10 +97,44 @@ export default defineComponent({
       progress: this.$refs['progress'],
       container: this.$refs['container'],
     });
+    this.checkStatus();
+    setStatusCallback(this.onStatusChange);
+  },
+  beforeUnmount() {
+    removeStatusCallback();
   },
   methods: {
     closeProgress() {
       showProgress(false);
+    },
+    handlePause() {
+      pauseDownload();
+    },
+    handleResume() {
+      resumeDownload();
+    },
+    handleCancel() {
+      cancelDownload();
+    },
+    checkStatus() {
+      const status = getDownloadStatus();
+      this.isDownloading = status.isDownloading;
+      this.memoryUsage = status.memoryUsage;
+
+      if (status.queueStatus) {
+        this.isPaused = status.queueStatus.paused;
+      }
+    },
+    onStatusChange(status) {
+      if (status.downloading !== undefined) {
+        this.isDownloading = status.downloading;
+      }
+      if (status.queueStatus) {
+        this.isPaused = status.queueStatus.paused;
+      }
+      if (status.memoryUsage) {
+        this.memoryUsage = status.memoryUsage;
+      }
     },
   },
 });
@@ -69,6 +156,38 @@ export default defineComponent({
   }
   .item{
     text-align: left;
+    font-size: 12px;
+    margin: 4px 0;
+  }
+  .memory {
+    font-size: 11px;
+    color: #666;
+  }
+  .memory-normal {
+    color: #18a058;
+  }
+  .memory-warning {
+    color: #f0a020;
+    font-weight: bold;
+  }
+  .memory-critical {
+    color: #d03050;
+    font-weight: bold;
+  }
+  .controls {
+    display: flex;
+    gap: 4px;
+    margin-top: 8px;
+    button {
+      flex: 1;
+      padding: 4px 8px;
+      font-size: 12px;
+      cursor: pointer;
+      &:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+    }
   }
 }
 </style>

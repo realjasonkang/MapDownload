@@ -5,6 +5,7 @@ let progressDom = null;
 let successDom = null;
 let errorDom = null;
 let containerDom = null;
+let statusCallback = null;
 export function getState() {
   return downloading;
 }
@@ -14,6 +15,7 @@ export function setState(val) {
     setProgress({success: 0, error: 0, percentage: 0});
     showProgress(true);
   }
+  notifyStatusChange({ downloading });
 }
 export function getProgress() {
   return statistics;
@@ -25,6 +27,7 @@ export function setProgress(val) {
   if (typeof percentage !== 'undefined') statistics.percentage = percentage;
   if (typeof count !== 'undefined') statistics.count = count;
   updateProgress();
+  notifyStatusChange({ statistics: { ...statistics } });
 }
 export function setProgressDom(val) {
   progressDom = val.progress;
@@ -49,4 +52,29 @@ export function progressAddSuccess() {
 export function progressAddError() {
   statistics.error++;
   updateProgress();
+}
+
+/**
+ * 注册状态更新回调函数
+ * @param {Function} callback - 状态更新回调函数
+ */
+export function setStatusCallback(callback) {
+  statusCallback = callback;
+}
+
+/**
+ * 移除状态更新回调函数
+ */
+export function removeStatusCallback() {
+  statusCallback = null;
+}
+
+/**
+ * 触发状态更新回调
+ * @param {Object} status - 状态信息
+ */
+export function notifyStatusChange(status) {
+  if (statusCallback && typeof statusCallback === 'function') {
+    statusCallback(status);
+  }
 }

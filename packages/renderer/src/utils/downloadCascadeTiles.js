@@ -39,7 +39,7 @@ const TEMP_POINT1 = new Point(0, 0);
 const TEMP_POINT2 = new Point(0, 0);
 const TEMP_POINT3 = new Point(0, 0);
 
-import { downloadImage } from './download';
+import { downloadImage, downloadController } from './download';
 import { progressAddSuccess, progressAddError } from './progress';
 
 // 下载瓦片
@@ -177,6 +177,17 @@ maptalks.TileLayer.prototype.downloadTiles = async function(tileZoom, containerE
   const extent = new PointExtent();
   const tilePoint = new Point(0, 0);
   for (let i = -top; i <= bottom; i++) {
+      if (downloadController.cancelled) {
+        return Promise.resolve(true);
+      }
+
+      while (downloadController.paused) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        if (downloadController.cancelled) {
+          return Promise.resolve(true);
+        }
+      }
+
       let j = -left;
       let leftVisitEnd = -Infinity;
       let rightVisitEnd = false;

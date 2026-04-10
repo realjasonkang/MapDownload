@@ -1,53 +1,146 @@
 // 下载
-import { setState, setProgress } from './progress';
+import { setState, setProgress, notifyStatusChange, getState } from './progress';
 import { judgeTile } from './baseMap';
 import { ClipImage } from './clipImage';
 import { DownloadQueue } from './downloadQueue';
+import { MemoryMonitor } from './memoryMonitor';
+import { TaskManager } from './taskManager';
 
 let currentQueue = null;
+let currentTaskId = null;
+let memoryMonitor = null;
+let taskManager = null;
+let downloadController = {
+  cancelled: false,
+  paused: false,
+};
 const CLIPIMAGE = new ClipImage();
 
-/**
- * 取消当前下载任务
- */
-export function cancelDownload() {
-  if (currentQueue) {
-    currentQueue.cancel();
-    currentQueue = null;
+const CLIPIMAGE_RECREATE_INTERVAL = 500;
+
+function getTaskManager() {
+  if (!taskManager) {
+    taskManager = new TaskManager();
   }
-  setState(false);
+  return taskManager;
 }
 
-/**
- * 暂停当前下载任务
- */
+function getMemoryMonitor() {
+  if (!memoryMonitor) {
+    memoryMonitor = new MemoryMonitor({
+      warningThreshold: 0.7,
+      criticalThreshold: 0.85,
+      interval: 10000,
+      onWarning: (usage) => {
+        const usedMB = Math.round(usage.usedJSHeapSize / 1024 / 1024);
+        const limitMB = Math.round(usage.jsHeapSizeLimit / 1024 / 1024);
+        const percent = Math.round(usage.usageRatio * 100);
+        window.$message.warning(`内存使用较高: ${usedMB}MB / ${limitMB}MB (${percent}%)`);
+      },
+      onCritical: (usage) => {
+        const usedMB = Math.round(usage.usedJSHeapSize / 1024 / 1024);
+        window.$message.error(`内存使用过高: ${usedMB}MB，正在尝试清理...`);
+      },
+      onCleanup: () => {
+        CLIPIMAGE.recreate();
+      },
+    });
+  }
+  return memoryMonitor;
+}
+
+export function cancelDownload() {
+  downloadController.cancelled = true;
+  downloadController.paused = false;
+
+  if (currentQueue) {
+    currentQueue.cancel();
+  }
+  if (currentTaskId) {
+    getTaskManager().cancelTask(currentTaskId);
+  }
+  if (memoryMonitor) {
+    memoryMonitor.stop();
+  }
+  CLIPIMAGE.cleanup();
+}
+
 export function pauseDownload() {
+  downloadController.paused = true;
+
   if (currentQueue) {
     currentQueue.pause();
   }
+  if (currentTaskId) {
+    getTaskManager().pauseTask(currentTaskId);
+  }
+
+  notifyStatusChange({
+    queueStatus: currentQueue ? currentQueue.getStatus() : { paused: true }
+  });
 }
 
-/**
- * 恢复当前下载任务
- */
 export function resumeDownload() {
+  downloadController.paused = false;
+
   if (currentQueue) {
     currentQueue.resume();
   }
+  if (currentTaskId) {
+    getTaskManager().resumeTask(currentTaskId);
+  }
+
+  notifyStatusChange({
+    queueStatus: currentQueue ? currentQueue.getStatus() : { paused: false }
+  });
 }
 
-/**
- * 下载瓦片 - 使用队列模式
- * @param {Array} list 瓦片列表
- * @param {Function} apiDownload 下载方法
- * @returns
- */
-export function downloadLoop(list, apiDownload) {
-  if (!Array.isArray(list) || typeof apiDownload !== 'function') return;
+export function getDownloadStatus() {
+  const isDownloading = getState();
+  return {
+    isDownloading,
+    queueStatus: currentQueue
+      ? currentQueue.getStatus()
+      : isDownloading
+        ? { paused: downloadController.paused }
+        : null,
+    taskId: currentTaskId,
+    memoryUsage: memoryMonitor ? memoryMonitor.getMemoryUsage() : null,
+  };
+}
+
+export function downloadLoop(list, apiDownload, taskConfig = null) {
+  downloadController.cancelled = false;
+  downloadController.paused = false;
+
+  if (!Array.isArray(list)) {
+    window.$message.error('下载失败：瓦片列表格式错误');
+    return;
+  }
+
+  if (typeof apiDownload !== 'function') {
+    window.$message.error('下载失败：下载函数未定义');
+    return;
+  }
+
   const length = list.length;
-  if (length === 0) return;
+  if (length === 0) {
+    window.$message.warning('没有需要下载的瓦片');
+    return;
+  }
 
   const statistics = { success: 0, error: 0, percentage: 0, count: length };
+
+  if (taskConfig) {
+    const task = getTaskManager().createTask({
+      ...taskConfig,
+      totalTiles: length,
+    });
+    currentTaskId = task.id;
+    getTaskManager().startTask(currentTaskId);
+  }
+
+  let clipImageCounter = 0;
 
   currentQueue = new DownloadQueue({
     concurrency: 5,
@@ -56,6 +149,15 @@ export function downloadLoop(list, apiDownload) {
       statistics.error = stats.error;
       statistics.percentage = stats.percentage;
       setProgress(statistics);
+
+      if (currentTaskId) {
+        getTaskManager().updateProgress(currentTaskId, {
+          total: stats.total,
+          completed: stats.completed,
+          success: stats.success,
+          error: stats.error,
+        });
+      }
     },
     onComplete: (stats) => {
       statistics.success = stats.success;
@@ -63,8 +165,34 @@ export function downloadLoop(list, apiDownload) {
       statistics.percentage = 100;
       setProgress(statistics);
       setState(false);
-      window.$message.success(`下载完成。下载成功${stats.success}，下载失败${stats.error}`);
+
+      if (currentTaskId) {
+        if (stats.cancelled) {
+          getTaskManager().cancelTask(currentTaskId);
+        } else {
+          getTaskManager().completeTask(currentTaskId);
+        }
+        currentTaskId = null;
+      }
+
+      if (memoryMonitor) {
+        memoryMonitor.stop();
+      }
+
+      if (stats.cancelled) {
+        window.$message.info(`下载已取消。已完成${stats.success}，失败${stats.error}`);
+      } else {
+        window.$message.success(`下载完成。下载成功${stats.success}，下载失败${stats.error}`);
+      }
+
+      notifyStatusChange({ downloading: false, queueStatus: null });
       currentQueue = null;
+    },
+    onTaskComplete: () => {
+      clipImageCounter++;
+      if (clipImageCounter % CLIPIMAGE_RECREATE_INTERVAL === 0) {
+        CLIPIMAGE.recreate();
+      }
     },
   });
 
@@ -74,22 +202,29 @@ export function downloadLoop(list, apiDownload) {
 
   currentQueue.add(tasks);
   setState(true);
+  getMemoryMonitor().start();
   currentQueue.start();
 }
 
-/**
- * 下载瓦片并裁切 - 使用队列模式
- * @param {Array} list 瓦片列表
- * @param {Function} apiDownload 下载方法
- * @param {maptalks.TileLayer} tileLayer 下载瓦片图层
- * @param {maptalks.Geometry} downloadGeometry 下载范围
- * @param {String} imageType 瓦片格式
- * @returns
- */
-export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry, imageType) {
-  if (!Array.isArray(list) || typeof apiDownload !== 'function') return;
+export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry, imageType, taskConfig = null) {
+  downloadController.cancelled = false;
+  downloadController.paused = false;
+
+  if (!Array.isArray(list)) {
+    window.$message.error('下载失败：瓦片列表格式错误');
+    return;
+  }
+
+  if (typeof apiDownload !== 'function') {
+    window.$message.error('下载失败：下载函数未定义');
+    return;
+  }
+
   const length = list.length;
-  if (length === 0) return;
+  if (length === 0) {
+    window.$message.warning('没有需要下载的瓦片');
+    return;
+  }
 
   const { width, height } = tileLayer.getTileSize();
   const spatialReference = tileLayer.getSpatialReference();
@@ -99,6 +234,18 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
 
   const statistics = { success: 0, error: 0, percentage: 0, count: length };
 
+  if (taskConfig) {
+    const task = getTaskManager().createTask({
+      ...taskConfig,
+      totalTiles: length,
+      clipImage: true,
+    });
+    currentTaskId = task.id;
+    getTaskManager().startTask(currentTaskId);
+  }
+
+  let clipImageCounter = 0;
+
   currentQueue = new DownloadQueue({
     concurrency: 3,
     onProgress: (stats) => {
@@ -106,6 +253,15 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
       statistics.error = stats.error;
       statistics.percentage = stats.percentage;
       setProgress(statistics);
+
+      if (currentTaskId) {
+        getTaskManager().updateProgress(currentTaskId, {
+          total: stats.total,
+          completed: stats.completed,
+          success: stats.success,
+          error: stats.error,
+        });
+      }
     },
     onComplete: (stats) => {
       statistics.success = stats.success;
@@ -113,9 +269,36 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
       statistics.percentage = 100;
       setProgress(statistics);
       setState(false);
-      window.$message.success(`下载完成。下载成功${stats.success}，下载失败${stats.error}`);
+
+      if (currentTaskId) {
+        if (stats.cancelled) {
+          getTaskManager().cancelTask(currentTaskId);
+        } else {
+          getTaskManager().completeTask(currentTaskId);
+        }
+        currentTaskId = null;
+      }
+
+      if (memoryMonitor) {
+        memoryMonitor.stop();
+      }
+
       CLIPIMAGE.cleanup();
+
+      if (stats.cancelled) {
+        window.$message.info(`下载已取消。已完成${stats.success}，失败${stats.error}`);
+      } else {
+        window.$message.success(`下载完成。下载成功${stats.success}，下载失败${stats.error}`);
+      }
+
+      notifyStatusChange({ downloading: false, queueStatus: null });
       currentQueue = null;
+    },
+    onTaskComplete: () => {
+      clipImageCounter++;
+      if (clipImageCounter % CLIPIMAGE_RECREATE_INTERVAL === 0) {
+        CLIPIMAGE.recreate();
+      }
     },
   });
 
@@ -147,15 +330,10 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
 
   currentQueue.add(tasks);
   setState(true);
+  getMemoryMonitor().start();
   currentQueue.start();
 }
 
-/**
- * 下载单张瓦片
- * @param {*} tile 瓦片参数
- * @param {*} downloadOption 下载参数
- * @returns Promise
- */
 export async function downloadImage(tile, downloadOption) {
   const { clipImage } = downloadOption;
   if (clipImage) {
@@ -165,12 +343,6 @@ export async function downloadImage(tile, downloadOption) {
   }
 }
 
-/**
- * 下载单张瓦片 - Promise 化
- * @param {*} tile
- * @param {*} downloadOption
- * @returns
- */
 async function _downloadImage(tile, downloadOption) {
   const temppath = downloadOption.downloadPath + tile.z + '/' + tile.x;
   window.electron.ipcRenderer.send('ensure-dir', temppath);
@@ -186,12 +358,6 @@ async function _downloadImage(tile, downloadOption) {
   }
 }
 
-/**
- * 下载单张瓦片并裁切 - Promise 化
- * @param {*} tile
- * @param {*} downloadOption
- * @returns
- */
 async function _downloadClipImage(tile, downloadOption) {
   const { tileLayer, downloadGeometry, pictureType, downloadPath, imageType } = downloadOption;
   const { width, height } = tileLayer.getTileSize();
@@ -246,3 +412,5 @@ async function _downloadClipImage(tile, downloadOption) {
 
   return false;
 }
+
+export { getTaskManager, getMemoryMonitor, downloadController };

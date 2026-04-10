@@ -1,53 +1,47 @@
 // 瓦片转换
 import { setState } from './progress';
 import { downloadLoop } from './download';
-// 经纬度转瓦片行列号
+
 function long2tile(lon, zoom) {
   return (Math.floor((lon + 180) / 360 * Math.pow(2, zoom)));
 }
 
-// 经纬度转瓦片行列号Google
 // eslint-disable-next-line
 function lat2tileGoogle(lat, zoom) {
   return (Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom)));
 }
-// 经纬度转瓦片行列号TMS
 // eslint-disable-next-line
 function lat2tileTMS(lat, zoom) {
   return ((1 << zoom) - (Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom))) - 1);
 }
-/**
- * 下载TMS瓦片
- */
+
 export class TileTMS {
   constructor(data, apiDownload, apiEnsureDirSync) {
     this.apiDownload = apiDownload;
-    this.rootPath = data.savePath; // 文件根目录
+    this.rootPath = data.savePath;
     this.maxZoom = data.maxZoom;
     this.minZoom = data.minZoom;
     this.mapExtent = data.extent;
-    // this.projection = data.mapConfig.projection.code; // BAIDU,EPSG:4326,EPSG:3857
     this.urlTemplate = data.mapConfig.config.urlTemplate;
     this.apiEnsureDirSync = apiEnsureDirSync;
     this.tileLayer = data.mapConfig.tileLayer;
-    setState(true);
-    downloadLoop(this.calcTiles(), this.apiDownload);
+    
+    const taskConfig = {
+      savePath: data.savePath,
+      minZoom: data.minZoom,
+      maxZoom: data.maxZoom,
+    };
+    downloadLoop(this.calcTiles(), this.apiDownload, taskConfig);
   }
   calcTiles() {
-    // 当前绝对路径
     const downloadPath = this.rootPath + '/';
-
-    // 下载范围
     const zmin = this.minZoom;
     const zmax = this.maxZoom + 1;
     const south_edge = this.mapExtent.ymin;
     const north_edge = this.mapExtent.ymax;
     const west_edge = this.mapExtent.xmin;
     const east_edge = this.mapExtent.xmax;
-    // 下载地址
-    // const baseUrl = this.urlTemplate;
     const pictureType = '.png';
-    // 遍历URL，获取数据
     const list = [];
     for (let z = zmin; z < zmax; z++) {
       const top_tile = lat2tileGoogle(north_edge, z);
@@ -63,7 +57,6 @@ export class TileTMS {
         const temppath = downloadPath + z + '/' + x;
         this.apiEnsureDirSync(temppath);
         for (let y = minLat; y < maxLat; y++) {
-          // const str3 = baseUrl.replace('{z}', z).replace('{x}', x).replace('{y}', y);
           const str3 = this.tileLayer.getTileUrl(x, y, z);
           const path2 = temppath + '/' + y + pictureType;
           list.push({zoom: z, url:str3, savePath:path2});
@@ -74,40 +67,38 @@ export class TileTMS {
   }
 }
 
-/**
- * 下载TMS瓦片集合
- */
 export class TileTMSList {
   constructor(data, apiDownload, apiEnsureDirSync) {
     this.apiDownload = apiDownload;
-    this.rootPath = data.savePath; // 文件根目录
+    this.rootPath = data.savePath;
     this.maxZoom = data.maxZoom;
     this.minZoom = data.minZoom;
     this.mapExtent = data.extent;
     this.apiEnsureDirSync = apiEnsureDirSync;
     this.tileLayer = data.mapConfig.tileLayer;
-    setState(true);
 
     let list = [];
     data.mapConfig.tileLayer.forEach(layer => {
       list = [...list, ...this.calcTiles(layer.config().style, layer)];
     });
-    downloadLoop(list, this.apiDownload);
+    
+    const taskConfig = {
+      savePath: data.savePath,
+      minZoom: data.minZoom,
+      maxZoom: data.maxZoom,
+      multiLayer: true,
+    };
+    downloadLoop(list, this.apiDownload, taskConfig);
   }
   calcTiles(subpath, layer) {
-    // 当前绝对路径
     const downloadPath = this.rootPath + '/' + subpath + '/';
-
-    // 下载范围
     const zmin = this.minZoom;
     const zmax = this.maxZoom + 1;
     const south_edge = this.mapExtent.ymin;
     const north_edge = this.mapExtent.ymax;
     const west_edge = this.mapExtent.xmin;
     const east_edge = this.mapExtent.xmax;
-    // 下载地址
     const pictureType = '.png';
-    // 遍历URL，获取数据
     const list = [];
     for (let z = zmin; z < zmax; z++) {
       const top_tile = lat2tileGoogle(north_edge, z);
@@ -133,36 +124,33 @@ export class TileTMSList {
   }
 }
 
-/**
- * 下载TMS瓦片集合，合并多张瓦片
- */
- export class TileTMSListMerge {
+export class TileTMSListMerge {
   constructor(data, apiDownload, apiEnsureDirSync) {
     this.apiDownload = apiDownload;
-    this.rootPath = data.savePath; // 文件根目录
+    this.rootPath = data.savePath;
     this.maxZoom = data.maxZoom;
     this.minZoom = data.minZoom;
     this.mapExtent = data.extent;
     this.apiEnsureDirSync = apiEnsureDirSync;
     this.tileLayer = data.mapConfig.tileLayer;
-    setState(true);
 
-    downloadLoop(this.calcTiles(data.mapConfig.tileLayer), this.apiDownload);
+    const taskConfig = {
+      savePath: data.savePath,
+      minZoom: data.minZoom,
+      maxZoom: data.maxZoom,
+      mergeLayers: true,
+    };
+    downloadLoop(this.calcTiles(data.mapConfig.tileLayer), this.apiDownload, taskConfig);
   }
   calcTiles(layers) {
-    // 当前绝对路径
     const downloadPath = this.rootPath + '/';
-
-    // 下载范围
     const zmin = this.minZoom;
     const zmax = this.maxZoom + 1;
     const south_edge = this.mapExtent.ymin;
     const north_edge = this.mapExtent.ymax;
     const west_edge = this.mapExtent.xmin;
     const east_edge = this.mapExtent.xmax;
-    // 下载地址
     const pictureType = '.png';
-    // 遍历URL，获取数据
     const list = [];
     for (let z = zmin; z < zmax; z++) {
       const top_tile = lat2tileGoogle(north_edge, z);
