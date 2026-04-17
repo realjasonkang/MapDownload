@@ -1,6 +1,6 @@
 // 瓦片转换
-import { setState, setProgress, notifyStatusChange } from './progress';
-import { downloadLoop, downloadClipLoop, downloadController } from './download';
+import { setState, setProgress, notifyStatusChange, getProgress } from './progress';
+import { downloadLoop, downloadClipLoop, downloadController, initPerformanceMonitor, updatePerformanceMonitor, getPerformanceStats } from './download';
 import {setMapLoading} from './baseMap.js';
 import { getFailedTilesManager } from './failedTilesManager';
 import { setCurrentFailedTaskId, clearCurrentFailedTaskId, getFailedTilesCount, flushFailedTiles } from './downloadCascadeTiles';
@@ -25,6 +25,9 @@ export class TileTMS {
   async downloadTiles(clipImage) {
     downloadController.cancelled = false;
     downloadController.paused = false;
+
+    // 初始化性能监控
+    initPerformanceMonitor(1);
 
     const manager = getFailedTilesManager();
     await manager.init();
@@ -73,11 +76,22 @@ export class TileTMS {
       statistics.percentage = Number(((z - zmin) / (zmax - zmin) * 100).toFixed(2));
       setProgress(statistics);
       await this.tileLayer.downloadCascadeTiles(z, option);
+
+      // 更新性能统计
+      const progress = getProgress();
+      const perfStats = updatePerformanceMonitor({
+        completed: progress.success + progress.error,
+        total: progress.count,
+      });
+      notifyStatusChange({ performance: perfStats });
     }
     statistics.percentage = 100;
     setProgress(statistics);
     setState(false);
     setMapLoading(false);
+
+    // 获取最终性能统计
+    const finalPerfStats = getPerformanceStats();
 
     await flushFailedTiles();
     const failedCount = getFailedTilesCount();
@@ -94,7 +108,11 @@ export class TileTMS {
     if (downloadController.cancelled) {
       window.$message.info('下载已取消');
     } else {
-      window.$message.success('瓦片数据下载完成。');
+      const avgSpeed = finalPerfStats ? finalPerfStats.avgSpeed || 0 : 0;
+      const elapsedTime = finalPerfStats ? finalPerfStats.elapsedTime || 0 : 0;
+      window.$message.success(
+        `瓦片数据下载完成。平均速度: ${avgSpeed} 瓦片/秒，耗时: ${elapsedTime} 秒`,
+      );
     }
 
     notifyStatusChange({ downloading: false, queueStatus: null, failedCount: failedCount });
@@ -123,6 +141,9 @@ export class TileTMSList {
   async downloadLayers(data) {
     downloadController.cancelled = false;
     downloadController.paused = false;
+
+    // 初始化性能监控
+    initPerformanceMonitor(1);
 
     const manager = getFailedTilesManager();
     await manager.init();
@@ -156,11 +177,22 @@ export class TileTMSList {
 
       const layer = data.mapConfig.tileLayer[index];
       await this.downloadTiles(data.clipImage, layer, (index + 1) / (data.mapConfig.tileLayer.length) * 100);
+
+      // 更新性能统计
+      const progress = getProgress();
+      const perfStats = updatePerformanceMonitor({
+        completed: progress.success + progress.error,
+        total: progress.count,
+      });
+      notifyStatusChange({ performance: perfStats });
     }
     statistics.percentage = 100;
     setProgress(statistics);
     setState(false);
     setMapLoading(false);
+
+    // 获取最终性能统计
+    const finalPerfStats = getPerformanceStats();
 
     await flushFailedTiles();
     const failedCount = getFailedTilesCount();
@@ -177,7 +209,11 @@ export class TileTMSList {
     if (downloadController.cancelled) {
       window.$message.info('下载已取消');
     } else {
-      window.$message.success('瓦片数据下载完成。');
+      const avgSpeed = finalPerfStats ? finalPerfStats.avgSpeed || 0 : 0;
+      const elapsedTime = finalPerfStats ? finalPerfStats.elapsedTime || 0 : 0;
+      window.$message.success(
+        `瓦片数据下载完成。平均速度: ${avgSpeed} 瓦片/秒，耗时: ${elapsedTime} 秒`,
+      );
     }
 
     notifyStatusChange({ downloading: false, queueStatus: null, failedCount: failedCount });

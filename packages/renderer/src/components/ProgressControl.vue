@@ -22,6 +22,38 @@
       />
     </div>
     <div
+      v-if="isDownloading && performanceStats"
+      class="item performance"
+    >
+      速度:<span class="speed">{{ speedText }} 瓦片/秒</span>
+    </div>
+    <div
+      v-if="isDownloading && performanceStats"
+      class="item performance"
+    >
+      线程:<span class="threads">{{ activeThreadsText }}</span>
+    </div>
+    <div
+      v-if="isDownloading && performanceStats"
+      class="item performance"
+    >
+      耗时:<span class="time">{{ elapsedTimeText }}</span>
+    </div>
+    <div
+      v-if="showFinalStats"
+      class="item final-stats"
+    >
+      <div class="stats-title">
+        性能统计
+      </div>
+      <div class="stats-item">
+        平均速度: <span class="avg-speed">{{ avgSpeedText }} 瓦片/秒</span>
+      </div>
+      <div class="stats-item">
+        总耗时: <span class="total-time">{{ elapsedTimeText }}</span>
+      </div>
+    </div>
+    <div
       v-if="memoryUsage"
       class="item memory"
     >
@@ -83,6 +115,9 @@ export default defineComponent({
       memoryUsage: null,
       failedCount: 0,
       showRetryButton: false,
+      performanceStats: null,
+      performanceTimer: null,
+      finalStats: null,
     };
   },
   computed: {
@@ -100,6 +135,30 @@ export default defineComponent({
       if (ratio >= 0.7) return 'memory-warning';
       return 'memory-normal';
     },
+    speedText() {
+      if (!this.performanceStats) return '0';
+      return this.performanceStats.speed || '0';
+    },
+    activeThreadsText() {
+      if (!this.performanceStats) return '0';
+      return `${this.performanceStats.activeThreads || 0}/${this.performanceStats.maxThreads || 0}`;
+    },
+    elapsedTimeText() {
+      if (!this.performanceStats) return '0秒';
+      const seconds = this.performanceStats.elapsedTime || 0;
+      if (seconds < 60) return `${seconds}秒`;
+      const minutes = Math.floor(seconds / 60);
+      const secs = seconds % 60;
+      return `${minutes}分${secs}秒`;
+    },
+    avgSpeedText() {
+      if (!this.finalStats && !this.performanceStats) return '0';
+      const stats = this.finalStats || this.performanceStats;
+      return stats.avgSpeed || '0';
+    },
+    showFinalStats() {
+      return !this.isDownloading && this.finalStats;
+    },
   },
   mounted() {
     setProgressDom({
@@ -110,9 +169,11 @@ export default defineComponent({
     });
     this.checkStatus();
     setStatusCallback(this.onStatusChange);
+    this.startPerformanceTimer();
   },
   beforeUnmount() {
     removeStatusCallback();
+    this.stopPerformanceTimer();
   },
   methods: {
     closeProgress() {
@@ -156,6 +217,27 @@ export default defineComponent({
       if (status.queueStatus) {
         this.isPaused = status.queueStatus.paused;
       }
+
+      if (status.isDownloading && status.performance) {
+        this.performanceStats = status.performance;
+      }
+    },
+    startPerformanceTimer() {
+      this.stopPerformanceTimer();
+      this.performanceTimer = setInterval(() => {
+        if (this.isDownloading) {
+          const status = getDownloadStatus();
+          if (status.performance) {
+            this.performanceStats = status.performance;
+          }
+        }
+      }, 1000);
+    },
+    stopPerformanceTimer() {
+      if (this.performanceTimer) {
+        clearInterval(this.performanceTimer);
+        this.performanceTimer = null;
+      }
     },
     onStatusChange(status) {
       if (status.downloading !== undefined) {
@@ -164,8 +246,14 @@ export default defineComponent({
           const progress = getProgress();
           this.failedCount = progress.error || 0;
           this.showRetryButton = this.failedCount > 0;
+
+          // 保存最终性能统计
+          if (this.performanceStats) {
+            this.finalStats = { ...this.performanceStats };
+          }
         } else {
           this.showRetryButton = false;
+          this.finalStats = null;
         }
       }
       if (status.queueStatus) {
@@ -176,6 +264,9 @@ export default defineComponent({
       }
       if (status.failedCount !== undefined) {
         this.failedCount = status.failedCount;
+      }
+      if (status.performance) {
+        this.performanceStats = status.performance;
       }
     },
   },
@@ -200,6 +291,48 @@ export default defineComponent({
     text-align: left;
     font-size: 12px;
     margin: 4px 0;
+  }
+  .performance {
+    font-size: 11px;
+    color: #666;
+    .speed {
+      color: #18a058;
+      font-weight: 500;
+    }
+    .threads {
+      color: #2080f0;
+      font-weight: 500;
+    }
+    .time {
+      color: #f0a020;
+      font-weight: 500;
+    }
+  }
+  .final-stats {
+    margin-top: 8px;
+    padding: 6px;
+    background-color: #f5f7fa;
+    border-radius: 4px;
+    border-left: 3px solid #18a058;
+    .stats-title {
+      font-size: 12px;
+      font-weight: bold;
+      color: #333;
+      margin-bottom: 4px;
+    }
+    .stats-item {
+      font-size: 11px;
+      color: #666;
+      margin: 2px 0;
+      .avg-speed {
+        color: #18a058;
+        font-weight: 500;
+      }
+      .total-time {
+        color: #f0a020;
+        font-weight: 500;
+      }
+    }
   }
   .memory {
     font-size: 11px;

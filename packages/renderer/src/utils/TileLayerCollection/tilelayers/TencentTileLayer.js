@@ -26,7 +26,7 @@ class TencentTileLayer extends BaseTileLayer {
         return {
             z: z,
             x: x,
-            y: Math.pow(2, z) - 1 - y
+            y: Math.pow(2, z) - 1 - y,
         };
     }
 }

@@ -6,6 +6,7 @@ import { DownloadQueue } from './downloadQueue';
 import { MemoryMonitor } from './memoryMonitor';
 import { TaskManager } from './taskManager';
 import { getFailedTilesManager } from './failedTilesManager';
+import { getDownloadConcurrency } from './config';
 
 let currentQueue = null;
 let currentTaskId = null;
@@ -20,6 +21,16 @@ let downloadController = {
 const CLIPIMAGE = new ClipImage();
 
 const CLIPIMAGE_RECREATE_INTERVAL = 500;
+
+// 性能监控相关变量
+let performanceMonitor = {
+  startTime: 0,
+  totalBytes: 0,
+  activeThreads: 0,
+  maxThreads: 0,
+  lastUpdateTime: 0,
+  lastCompletedCount: 0,
+};
 
 function getTaskManager() {
   if (!taskManager) {
@@ -59,6 +70,115 @@ function getFailedManager() {
   return failedTilesManager;
 }
 
+/**
+ * 初始化工作线程池
+ * 通过 IPC 调用主进程初始化多线程下载
+ *
+ * @param {number} concurrency - 并发度（线程数）
+ * @returns {Promise<boolean>} 是否初始化成功
+ */
+async function initWorkerPool(concurrency) {
+  try {
+    const result = await window.electron.ipcRenderer.invoke('init-download-worker', {
+      concurrency,
+    });
+    if (result && result.success) {
+      console.log(`[Download] Worker pool initialized with ${concurrency} threads`);
+      return true;
+    }
+    console.warn('[Download] Worker pool initialization returned false');
+    return false;
+  } catch (error) {
+    console.error('[Download] Failed to initialize worker pool:', error);
+    return false;
+  }
+}
+
+/**
+ * 初始化性能监控
+ *
+ * @param {number} maxThreads - 最大线程数
+ */
+function initPerformanceMonitor(maxThreads) {
+  performanceMonitor = {
+    startTime: Date.now(),
+    totalBytes: 0,
+    activeThreads: 0,
+    maxThreads,
+    lastUpdateTime: Date.now(),
+    lastCompletedCount: 0,
+    lastSpeed: 0,
+    pendingTasks: 0,
+  };
+}
+
+/**
+ * 更新性能监控数据
+ *
+ * @param {Object} stats - 下载统计数据
+ * @returns {Object} 性能指标
+ */
+function updatePerformanceMonitor(stats) {
+  const now = Date.now();
+  const timeDiff = (now - performanceMonitor.lastUpdateTime) / 1000; // 秒
+  const completedDiff = stats.completed - performanceMonitor.lastCompletedCount;
+
+  // 计算下载速度（瓦片/秒）
+  const speed = timeDiff > 0 ? completedDiff / timeDiff : 0;
+
+  // 计算平均速度
+  const totalTime = (now - performanceMonitor.startTime) / 1000;
+  const avgSpeed = totalTime > 0 ? stats.completed / totalTime : 0;
+
+  // 估算活跃线程数（基于队列状态）
+  const activeThreads = Math.min(
+    performanceMonitor.maxThreads,
+    stats.total - stats.completed,
+  );
+
+  const pendingTasks = stats.total - stats.completed;
+
+  // 更新状态
+  performanceMonitor.lastUpdateTime = now;
+  performanceMonitor.lastCompletedCount = stats.completed;
+  performanceMonitor.activeThreads = activeThreads;
+  performanceMonitor.lastSpeed = speed;
+  performanceMonitor.pendingTasks = pendingTasks;
+
+  return {
+    speed: Math.round(speed * 10) / 10, // 保留一位小数
+    avgSpeed: Math.round(avgSpeed * 10) / 10,
+    activeThreads,
+    maxThreads: performanceMonitor.maxThreads,
+    pendingTasks,
+    elapsedTime: Math.round(totalTime),
+  };
+}
+
+/**
+ * 获取性能监控数据
+ *
+ * @returns {Object} 性能监控数据
+ */
+function getPerformanceStats() {
+  if (performanceMonitor.startTime === 0) {
+    return null;
+  }
+
+  const now = Date.now();
+  const totalTime = (now - performanceMonitor.startTime) / 1000;
+  const avgSpeed = totalTime > 0 ? performanceMonitor.lastCompletedCount / totalTime : 0;
+
+  return {
+    speed: performanceMonitor.lastSpeed || 0,
+    avgSpeed: Math.round(avgSpeed * 10) / 10,
+    activeThreads: performanceMonitor.activeThreads || 0,
+    maxThreads: performanceMonitor.maxThreads || 0,
+    pendingTasks: performanceMonitor.pendingTasks || 0,
+    elapsedTime: Math.round(totalTime),
+  };
+}
+
 export function cancelDownload() {
   downloadController.cancelled = true;
   downloadController.paused = false;
@@ -86,7 +206,7 @@ export function pauseDownload() {
   }
 
   notifyStatusChange({
-    queueStatus: currentQueue ? currentQueue.getStatus() : { paused: true }
+    queueStatus: currentQueue ? currentQueue.getStatus() : { paused: true },
   });
 }
 
@@ -101,7 +221,7 @@ export function resumeDownload() {
   }
 
   notifyStatusChange({
-    queueStatus: currentQueue ? currentQueue.getStatus() : { paused: false }
+    queueStatus: currentQueue ? currentQueue.getStatus() : { paused: false },
   });
 }
 
@@ -116,10 +236,11 @@ export function getDownloadStatus() {
         : null,
     taskId: currentTaskId,
     memoryUsage: memoryMonitor ? memoryMonitor.getMemoryUsage() : null,
+    performance: isDownloading ? getPerformanceStats() : null,
   };
 }
 
-export function downloadLoop(list, apiDownload, taskConfig = null, onTileFailed = null) {
+export function downloadLoop(list, apiDownload, taskConfig = null, onTileFailed = null, concurrency = null) {
   downloadController.cancelled = false;
   downloadController.paused = false;
 
@@ -139,6 +260,17 @@ export function downloadLoop(list, apiDownload, taskConfig = null, onTileFailed 
     return;
   }
 
+  // 获取并发度配置
+  const downloadConcurrency = concurrency || getDownloadConcurrency();
+
+  // 初始化工作线程池
+  initWorkerPool(downloadConcurrency).catch((err) => {
+    console.error('[Download] Failed to init worker pool:', err);
+  });
+
+  // 初始化性能监控
+  initPerformanceMonitor(downloadConcurrency);
+
   const statistics = { success: 0, error: 0, percentage: 0, count: length };
   const failedTiles = [];
 
@@ -154,12 +286,18 @@ export function downloadLoop(list, apiDownload, taskConfig = null, onTileFailed 
   let clipImageCounter = 0;
 
   currentQueue = new DownloadQueue({
-    concurrency: 5,
+    concurrency: downloadConcurrency,
     onProgress: (stats) => {
       statistics.success = stats.success;
       statistics.error = stats.error;
       statistics.percentage = stats.percentage;
       setProgress(statistics);
+
+      // 更新性能监控
+      const perfStats = updatePerformanceMonitor(stats);
+
+      // 通知性能统计更新
+      notifyStatusChange({ performance: perfStats });
 
       if (currentTaskId) {
         getTaskManager().updateProgress(currentTaskId, {
@@ -167,6 +305,7 @@ export function downloadLoop(list, apiDownload, taskConfig = null, onTileFailed 
           completed: stats.completed,
           success: stats.success,
           error: stats.error,
+          performance: perfStats,
         });
       }
     },
@@ -177,11 +316,16 @@ export function downloadLoop(list, apiDownload, taskConfig = null, onTileFailed 
       setProgress(statistics);
       setState(false);
 
+      // 获取最终性能统计
+      const finalPerfStats = getPerformanceStats();
+
       if (currentTaskId) {
         if (stats.cancelled) {
           getTaskManager().cancelTask(currentTaskId);
         } else {
-          getTaskManager().completeTask(currentTaskId);
+          getTaskManager().completeTask(currentTaskId, {
+            performance: finalPerfStats,
+          });
         }
         currentTaskId = null;
       }
@@ -201,7 +345,12 @@ export function downloadLoop(list, apiDownload, taskConfig = null, onTileFailed 
       if (stats.cancelled) {
         window.$message.info(`下载已取消。已完成${stats.success}，失败${stats.error}`);
       } else {
-        window.$message.success(`下载完成。下载成功${stats.success}，下载失败${stats.error}`);
+        const avgSpeed = finalPerfStats.avgSpeed || 0;
+        const elapsedTime = finalPerfStats.elapsedTime || 0;
+        window.$message.success(
+          `下载完成。下载成功${stats.success}，下载失败${stats.error}。` +
+          `平均速度: ${avgSpeed} 瓦片/秒，耗时: ${elapsedTime} 秒`,
+        );
       }
 
       notifyStatusChange({ downloading: false, queueStatus: null, failedCount: stats.error });
@@ -251,7 +400,7 @@ export function downloadLoop(list, apiDownload, taskConfig = null, onTileFailed 
   currentQueue.start();
 }
 
-export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry, imageType, taskConfig = null, onTileFailed = null) {
+export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry, imageType, taskConfig = null, onTileFailed = null, concurrency = null) {
   downloadController.cancelled = false;
   downloadController.paused = false;
 
@@ -270,6 +419,17 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
     window.$message.warning('没有需要下载的瓦片');
     return;
   }
+
+  // 获取并发度配置（裁切下载默认使用较低的并发度）
+  const downloadConcurrency = concurrency || getDownloadConcurrency();
+
+  // 初始化工作线程池
+  initWorkerPool(downloadConcurrency).catch((err) => {
+    console.error('[Download] Failed to init worker pool:', err);
+  });
+
+  // 初始化性能监控
+  initPerformanceMonitor(downloadConcurrency);
 
   const { width, height } = tileLayer.getTileSize();
   const spatialReference = tileLayer.getSpatialReference();
@@ -293,12 +453,18 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
   let clipImageCounter = 0;
 
   currentQueue = new DownloadQueue({
-    concurrency: 3,
+    concurrency: downloadConcurrency,
     onProgress: (stats) => {
       statistics.success = stats.success;
       statistics.error = stats.error;
       statistics.percentage = stats.percentage;
       setProgress(statistics);
+
+      // 更新性能监控
+      const perfStats = updatePerformanceMonitor(stats);
+
+      // 通知性能统计更新
+      notifyStatusChange({ performance: perfStats });
 
       if (currentTaskId) {
         getTaskManager().updateProgress(currentTaskId, {
@@ -306,6 +472,7 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
           completed: stats.completed,
           success: stats.success,
           error: stats.error,
+          performance: perfStats,
         });
       }
     },
@@ -316,11 +483,16 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
       setProgress(statistics);
       setState(false);
 
+      // 获取最终性能统计
+      const finalPerfStats = getPerformanceStats();
+
       if (currentTaskId) {
         if (stats.cancelled) {
           getTaskManager().cancelTask(currentTaskId);
         } else {
-          getTaskManager().completeTask(currentTaskId);
+          getTaskManager().completeTask(currentTaskId, {
+            performance: finalPerfStats,
+          });
         }
         currentTaskId = null;
       }
@@ -342,7 +514,12 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
       if (stats.cancelled) {
         window.$message.info(`下载已取消。已完成${stats.success}，失败${stats.error}`);
       } else {
-        window.$message.success(`下载完成。下载成功${stats.success}，下载失败${stats.error}`);
+        const avgSpeed = finalPerfStats.avgSpeed || 0;
+        const elapsedTime = finalPerfStats.elapsedTime || 0;
+        window.$message.success(
+          `下载完成。下载成功${stats.success}，下载失败${stats.error}。` +
+          `平均速度: ${avgSpeed} 瓦片/秒，耗时: ${elapsedTime} 秒`,
+        );
       }
 
       notifyStatusChange({ downloading: false, queueStatus: null, failedCount: stats.error });
@@ -496,9 +673,10 @@ async function _downloadClipImage(tile, downloadOption) {
 /**
  * 重试下载失败瓦片
  * @param {Object} task 失败任务对象
+ * @param {number} concurrency - 可选的并发度配置
  * @returns {Promise<void>}
  */
-export async function retryFailedTask(task) {
+export async function retryFailedTask(task, concurrency = null) {
   if (getState()) {
     window.$message.warning('下载任务执行中，请稍后重试');
     return;
@@ -516,6 +694,17 @@ export async function retryFailedTask(task) {
   downloadController.cancelled = false;
   downloadController.paused = false;
 
+  // 获取并发度配置
+  const downloadConcurrency = concurrency || getDownloadConcurrency();
+
+  // 初始化工作线程池
+  initWorkerPool(downloadConcurrency).catch((err) => {
+    console.error('[Download] Failed to init worker pool:', err);
+  });
+
+  // 初始化性能监控
+  initPerformanceMonitor(downloadConcurrency);
+
   const statistics = { success: 0, error: 0, percentage: 0, count: tiles.length };
   const successTileIds = [];
   const stillFailedTiles = [];
@@ -523,12 +712,18 @@ export async function retryFailedTask(task) {
   currentFailedTaskId = task.taskId;
 
   currentQueue = new DownloadQueue({
-    concurrency: 5,
+    concurrency: downloadConcurrency,
     onProgress: (stats) => {
       statistics.success = stats.success;
       statistics.error = stats.error;
       statistics.percentage = stats.percentage;
       setProgress(statistics);
+
+      // 更新性能监控
+      const perfStats = updatePerformanceMonitor(stats);
+
+      // 通知性能统计更新
+      notifyStatusChange({ performance: perfStats });
     },
     onComplete: async (stats) => {
       statistics.success = stats.success;
@@ -536,6 +731,9 @@ export async function retryFailedTask(task) {
       statistics.percentage = 100;
       setProgress(statistics);
       setState(false);
+
+      // 获取最终性能统计
+      const finalPerfStats = getPerformanceStats();
 
       if (memoryMonitor) {
         memoryMonitor.stop();
@@ -566,7 +764,12 @@ export async function retryFailedTask(task) {
         window.$message.success(`重试完成。全部成功${stats.success}`);
         await manager.deleteFailedTask(task.taskId);
       } else {
-        window.$message.success(`重试完成。成功${stats.success}，失败${stats.error}`);
+        const avgSpeed = finalPerfStats.avgSpeed || 0;
+        const elapsedTime = finalPerfStats.elapsedTime || 0;
+        window.$message.success(
+          `重试完成。成功${stats.success}，失败${stats.error}。` +
+          `平均速度: ${avgSpeed} 瓦片/秒，耗时: ${elapsedTime} 秒`,
+        );
       }
 
       notifyStatusChange({ downloading: false, queueStatus: null, failedCount: stats.error });
@@ -649,4 +852,4 @@ async function retryDownloadTile(tile) {
   return false;
 }
 
-export { getTaskManager, getMemoryMonitor, downloadController };
+export { getTaskManager, getMemoryMonitor, downloadController, getPerformanceStats, initPerformanceMonitor, updatePerformanceMonitor };

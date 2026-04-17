@@ -5,7 +5,7 @@ const ImageryType = {
   WMS: 'wms',
   WMTS: 'wmts',
   XYZ: 'xyz',
-  COORD: 'coord'
-}
+  COORD: 'coord',
+};
 
-export default ImageryType
+export default ImageryType;
