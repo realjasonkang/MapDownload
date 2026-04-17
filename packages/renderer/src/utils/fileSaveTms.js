@@ -4,6 +4,7 @@ import { downloadLoop, downloadClipLoop, downloadController, initPerformanceMoni
 import {setMapLoading} from './baseMap.js';
 import { getFailedTilesManager } from './failedTilesManager';
 import { setCurrentFailedTaskId, clearCurrentFailedTaskId, getFailedTilesCount, flushFailedTiles } from './downloadCascadeTiles';
+import { getDownloadConcurrency } from './config';
 
 export class TileTMS {
   constructor(data) {
@@ -26,8 +27,11 @@ export class TileTMS {
     downloadController.cancelled = false;
     downloadController.paused = false;
 
+    // 获取并发度配置
+    const concurrency = getDownloadConcurrency();
+
     // 初始化性能监控
-    initPerformanceMonitor(1);
+    initPerformanceMonitor(concurrency);
 
     const manager = getFailedTilesManager();
     await manager.init();
@@ -59,6 +63,10 @@ export class TileTMS {
     }
     const statistics = {percentage: 0, count: 100};
     setState(true);
+    
+    // 初始化进度统计
+    const progressStats = { success: 0, error: 0, percentage: 0, count: 0 };
+    
     for (let z = zmin; z < zmax; z++) {
       if (downloadController.cancelled) {
         break;
@@ -77,11 +85,13 @@ export class TileTMS {
       setProgress(statistics);
       await this.tileLayer.downloadCascadeTiles(z, option);
 
-      // 更新性能统计
-      const progress = getProgress();
+      // 更新性能统计：从全局 statistics 读取
+      progressStats.success = getProgress().success;
+      progressStats.error = getProgress().error;
+      progressStats.count = getProgress().count || (progressStats.success + progressStats.error + 100); // 估算总数
       const perfStats = updatePerformanceMonitor({
-        completed: progress.success + progress.error,
-        total: progress.count,
+        completed: progressStats.success + progressStats.error,
+        total: progressStats.count,
       });
       notifyStatusChange({ performance: perfStats });
     }
@@ -142,8 +152,11 @@ export class TileTMSList {
     downloadController.cancelled = false;
     downloadController.paused = false;
 
+    // 获取并发度配置
+    const concurrency = getDownloadConcurrency();
+
     // 初始化性能监控
-    initPerformanceMonitor(1);
+    initPerformanceMonitor(concurrency);
 
     const manager = getFailedTilesManager();
     await manager.init();
@@ -161,6 +174,10 @@ export class TileTMSList {
 
     setState(true);
     const statistics = {percentage: 0, count: 100};
+    
+    // 初始化进度统计
+    const progressStats = { success: 0, error: 0, percentage: 0, count: 0 };
+    
     for (let index = 0; index < data.mapConfig.tileLayer.length; index++) {
       if (downloadController.cancelled) {
         break;
@@ -178,11 +195,13 @@ export class TileTMSList {
       const layer = data.mapConfig.tileLayer[index];
       await this.downloadTiles(data.clipImage, layer, (index + 1) / (data.mapConfig.tileLayer.length) * 100);
 
-      // 更新性能统计
-      const progress = getProgress();
+      // 更新性能统计：从全局 statistics 读取
+      progressStats.success = getProgress().success;
+      progressStats.error = getProgress().error;
+      progressStats.count = getProgress().count || (progressStats.success + progressStats.error + 100);
       const perfStats = updatePerformanceMonitor({
-        completed: progress.success + progress.error,
-        total: progress.count,
+        completed: progressStats.success + progressStats.error,
+        total: progressStats.count,
       });
       notifyStatusChange({ performance: perfStats });
     }

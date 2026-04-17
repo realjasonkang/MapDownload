@@ -139,53 +139,64 @@ export class DownloadQueue {
       return;
     }
 
+    // 启动并发任务，直到达到并发上限或队列为空
     while (this.active < this.concurrency && this.queue.length > 0 && !this.paused && !this.cancelled) {
       const task = this.queue.shift();
       this.active++;
 
-      try {
-        const result = await task.handler();
-        if (result) {
-          this.statistics.success++;
-        } else {
-          this.statistics.error++;
-          if (task.tileData && this.onTaskFailed) {
-            this.onTaskFailed(task.tileData);
-          }
-        }
-      } catch (error) {
-        console.error('任务执行错误:', error);
+      // 异步执行任务，但不等待完成，让它在后台运行
+      this._executeTask(task);
+    }
+  }
+
+  /**
+   * 执行单个任务
+   * @param {Object} task 任务对象
+   * @private
+   */
+  async _executeTask(task) {
+    try {
+      const result = await task.handler();
+      if (result) {
+        this.statistics.success++;
+      } else {
         this.statistics.error++;
         if (task.tileData && this.onTaskFailed) {
           this.onTaskFailed(task.tileData);
         }
       }
+    } catch (error) {
+      console.error('任务执行错误:', error);
+      this.statistics.error++;
+      if (task.tileData && this.onTaskFailed) {
+        this.onTaskFailed(task.tileData);
+      }
+    }
 
-      this.statistics.completed++;
-      this.active--;
+    this.statistics.completed++;
+    this.active--;
 
-      this.onProgress({
+    this.onProgress({
+      ...this.statistics,
+      percentage: this.statistics.total > 0
+        ? Number((this.statistics.completed / this.statistics.total * 100).toFixed(2))
+        : 0,
+    });
+
+    this.onTaskComplete(this.statistics);
+
+    // 检查是否完成
+    if (this.cancelled && this.queue.length === 0 && this.active === 0) {
+      this.onComplete({
         ...this.statistics,
-        percentage: this.statistics.total > 0
-          ? Number((this.statistics.completed / this.statistics.total * 100).toFixed(2))
-          : 0,
+        cancelled: this.cancelled,
       });
+      return;
+    }
 
-      this.onTaskComplete(this.statistics);
-
-      if (this.cancelled && this.queue.length === 0 && this.active === 0) {
-        this.onComplete({
-          ...this.statistics,
-          cancelled: this.cancelled,
-        });
-        return;
-      }
-
-      if (this.paused) return;
-
-      if (!this.paused && !this.cancelled) {
-        this._processNext();
-      }
+    // 处理队列中的下一个任务
+    if (!this.paused && !this.cancelled) {
+      this._processNext();
     }
   }
 }

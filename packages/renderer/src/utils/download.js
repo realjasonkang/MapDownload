@@ -30,6 +30,9 @@ let performanceMonitor = {
   maxThreads: 0,
   lastUpdateTime: 0,
   lastCompletedCount: 0,
+  // 滑动窗口：用于计算平滑速度
+  speedHistory: [],  // 记录最近的时间戳和完成数
+  speedWindowSize: 5000,  // 5秒滑动窗口
 };
 
 function getTaskManager() {
@@ -109,6 +112,8 @@ function initPerformanceMonitor(maxThreads) {
     lastCompletedCount: 0,
     lastSpeed: 0,
     pendingTasks: 0,
+    speedHistory: [],
+    speedWindowSize: 5000,
   };
 }
 
@@ -120,21 +125,41 @@ function initPerformanceMonitor(maxThreads) {
  */
 function updatePerformanceMonitor(stats) {
   const now = Date.now();
-  const timeDiff = (now - performanceMonitor.lastUpdateTime) / 1000; // 秒
-  const completedDiff = stats.completed - performanceMonitor.lastCompletedCount;
+  
+  // 记录当前时间点和完成数到历史
+  performanceMonitor.speedHistory.push({
+    time: now,
+    completed: stats.completed,
+  });
 
-  // 计算下载速度（瓦片/秒）
-  const speed = timeDiff > 0 ? completedDiff / timeDiff : 0;
+  // 清理超出窗口的历史记录
+  const windowStart = now - performanceMonitor.speedWindowSize;
+  performanceMonitor.speedHistory = performanceMonitor.speedHistory.filter(
+    entry => entry.time >= windowStart
+  );
 
-  // 计算平均速度
+  // 计算滑动窗口内的速度
+  const history = performanceMonitor.speedHistory;
+  let speed = 0;
+  if (history.length >= 2) {
+    const firstEntry = history[0];
+    const lastEntry = history[history.length - 1];
+    const timeDiff = (lastEntry.time - firstEntry.time) / 1000; // 秒
+    const completedDiff = lastEntry.completed - firstEntry.completed;
+    speed = timeDiff > 0 ? completedDiff / timeDiff : 0;
+  } else if (history.length === 1) {
+    // 如果只有一个采样点，使用总平均速度
+    const totalTime = (now - performanceMonitor.startTime) / 1000;
+    speed = totalTime > 0 ? stats.completed / totalTime : 0;
+  }
+
+  // 计算平均速度（从开始到现在）
   const totalTime = (now - performanceMonitor.startTime) / 1000;
   const avgSpeed = totalTime > 0 ? stats.completed / totalTime : 0;
 
   // 估算活跃线程数（基于队列状态）
-  const activeThreads = Math.min(
-    performanceMonitor.maxThreads,
-    stats.total - stats.completed,
-  );
+  // 对于串行下载，活跃线程数为 1（如果正在下载）或 0（如果完成）
+  const activeThreads = currentQueue ? currentQueue.active : (stats.completed < stats.total ? 1 : 0);
 
   const pendingTasks = stats.total - stats.completed;
 
@@ -169,14 +194,50 @@ function getPerformanceStats() {
   const totalTime = (now - performanceMonitor.startTime) / 1000;
   const avgSpeed = totalTime > 0 ? performanceMonitor.lastCompletedCount / totalTime : 0;
 
+  // 清理超出窗口的历史记录
+  const windowStart = now - performanceMonitor.speedWindowSize;
+  performanceMonitor.speedHistory = performanceMonitor.speedHistory.filter(
+    entry => entry.time >= windowStart
+  );
+
+  // 计算滑动窗口内的速度
+  const history = performanceMonitor.speedHistory;
+  let speed = 0;
+  if (history.length >= 2) {
+    const firstEntry = history[0];
+    const lastEntry = history[history.length - 1];
+    const timeDiff = (lastEntry.time - firstEntry.time) / 1000;
+    const completedDiff = lastEntry.completed - firstEntry.completed;
+    speed = timeDiff > 0 ? completedDiff / timeDiff : 0;
+  } else if (history.length === 1) {
+    // 如果只有一个采样点，使用总平均速度
+    speed = totalTime > 0 ? performanceMonitor.lastCompletedCount / totalTime : 0;
+  }
+
   return {
-    speed: performanceMonitor.lastSpeed || 0,
+    speed: Math.round(speed * 10) / 10,
     avgSpeed: Math.round(avgSpeed * 10) / 10,
     activeThreads: performanceMonitor.activeThreads || 0,
     maxThreads: performanceMonitor.maxThreads || 0,
     pendingTasks: performanceMonitor.pendingTasks || 0,
     elapsedTime: Math.round(totalTime),
   };
+}
+
+/**
+ * 设置当前活动队列（供外部使用）
+ * @param {DownloadQueue|null} queue - 下载队列实例
+ */
+export function setCurrentQueue(queue) {
+  currentQueue = queue;
+}
+
+/**
+ * 获取当前活动队列
+ * @returns {DownloadQueue|null}
+ */
+export function getCurrentQueue() {
+  return currentQueue;
 }
 
 export function cancelDownload() {

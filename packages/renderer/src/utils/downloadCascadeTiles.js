@@ -39,8 +39,10 @@ const TEMP_POINT1 = new Point(0, 0);
 const TEMP_POINT2 = new Point(0, 0);
 const TEMP_POINT3 = new Point(0, 0);
 
-import { downloadImage, downloadController } from './download';
-import { progressAddSuccess, progressAddError } from './progress';
+import { downloadImage, downloadController, setCurrentQueue, updatePerformanceMonitor } from './download';
+import { DownloadQueue } from './downloadQueue';
+import { getDownloadConcurrency } from './config';
+import { progressAddSuccess, progressAddError, notifyStatusChange } from './progress';
 import { getFailedTilesManager } from './failedTilesManager';
 
 let currentFailedTaskId = null;
@@ -233,16 +235,21 @@ maptalks.TileLayer.prototype.downloadTiles = async function(tileZoom, containerE
       scale = this._getTileConfig().tileSystem.scale;
   const extent = new PointExtent();
   const tilePoint = new Point(0, 0);
+  
+  // 分批收集+下载：每批收集固定数量的瓦片后立即下载，释放内存后再收集下一批
+  const BATCH_SIZE = 1000; // 每批收集的瓦片数量
+  let batchTiles = []; // 当前批次收集的瓦片
+  
+  // 内部函数：下载当前批次的瓦片
+  const downloadCurrentBatch = async () => {
+    if (batchTiles.length === 0) return;
+    await this.downloadTilesWithQueue(batchTiles, downloadOption);
+    batchTiles = []; // 清空当前批次，释放内存
+  };
+  
   for (let i = -top; i <= bottom; i++) {
       if (downloadController.cancelled) {
         return Promise.resolve(true);
-      }
-
-      while (downloadController.paused) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-        if (downloadController.cancelled) {
-          return Promise.resolve(true);
-        }
       }
 
       let j = -left;
@@ -311,18 +318,17 @@ maptalks.TileLayer.prototype.downloadTiles = async function(tileZoom, containerE
               if (this._visitedTiles && cascadeLevel === 0) {
                 this._visitedTiles.add(tileId);
               }
+              
+              // 收集瓦片到当前批次
               if (cascadeLevel === 0) {
                 const tiles = [];
                 this._splitTiles(frustumMatrix, tiles, renderer, idx, z + 1, tileExtent, dx, dy, tileOffsets, parentRenderer);
                 extent._combine(tileExtent);
-                const rrr = await downloadImage(tiles[0], downloadOption);
-                if (rrr) {
-                  progressAddSuccess();
-                } else {
-                  progressAddError();
-                  if (tiles[0]) {
-                    recordFailedTile(tiles[0], downloadOption);
-                  }
+                if (tiles[0]) {
+                  batchTiles.push({
+                    tileData: tiles[0],
+                    isSplit: true,
+                  });
                 }
               } else {
                   if (!tileInfo) {
@@ -344,16 +350,18 @@ maptalks.TileLayer.prototype.downloadTiles = async function(tileZoom, containerE
                       tileInfo.offset[0] = offset[0];
                       tileInfo.offset[1] = offset[1];
                   }
-
-                  const rrr = await downloadImage(tileInfo, downloadOption);
-                  if (rrr) {
-                    progressAddSuccess();
-                  } else {
-                    progressAddError();
-                    recordFailedTile(tileInfo, downloadOption);
-                  }
                   extent._combine(tileExtent);
+                  batchTiles.push({
+                    tileData: tileInfo,
+                    isSplit: false,
+                  });
               }
+              
+              // 当批次达到大小时，立即下载
+              if (batchTiles.length >= BATCH_SIZE) {
+                await downloadCurrentBatch();
+              }
+              
               if (leftVisitEnd === -Infinity) {
                   //从左往右第一次遇到可视的瓦片，改为从右往左遍历
                   leftVisitEnd = j;
@@ -366,5 +374,76 @@ maptalks.TileLayer.prototype.downloadTiles = async function(tileZoom, containerE
           }
       }
   }
+  
+  // 下载剩余的瓦片
+  await downloadCurrentBatch();
+  
   return Promise.resolve(true);
+};
+
+// 使用并发队列下载瓦片
+maptalks.TileLayer.prototype.downloadTilesWithQueue = async function(batchTiles, downloadOption) {
+  const concurrency = getDownloadConcurrency();
+  
+  return new Promise((resolve) => {
+    const queue = new DownloadQueue({
+      concurrency,
+      onProgress: (stats) => {
+        // 实时更新性能监控
+        const perfStats = updatePerformanceMonitor({
+          completed: stats.success + stats.error,
+          total: stats.total,
+        });
+        notifyStatusChange({ performance: perfStats });
+      },
+      onComplete: () => {
+        setCurrentQueue(null); // 完成后清除
+        resolve(true);
+      },
+    });
+    
+    // 设置当前活动队列
+    setCurrentQueue(queue);
+    
+    // 创建任务列表：DownloadQueue 期望 { handler, tileData } 格式
+    const tasks = batchTiles.map(({ tileData }) => {
+      return {
+        tileData,
+        handler: async () => {
+          // 检查暂停状态
+          while (downloadController.paused) {
+            await new Promise(r => setTimeout(r, 100));
+            if (downloadController.cancelled) {
+              queue.cancel();
+              return false;
+            }
+          }
+          
+          if (downloadController.cancelled) {
+            queue.cancel();
+            return false;
+          }
+          
+          try {
+            const result = await downloadImage(tileData, downloadOption);
+            if (result) {
+              progressAddSuccess();
+            } else {
+              progressAddError();
+              recordFailedTile(tileData, downloadOption);
+            }
+            return result;
+          } catch (error) {
+            console.error('[Download] Tile download failed:', error);
+            progressAddError();
+            recordFailedTile(tileData, downloadOption);
+            return false;
+          }
+        },
+      };
+    });
+    
+    queue.add(tasks);
+    queue.start();
+  });
 };

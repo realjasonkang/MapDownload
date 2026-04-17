@@ -118,6 +118,40 @@ ipcMain.handle('get-worker-status', async () => {
   };
 });
 
+// 初始化工作线程池
+ipcMain.handle('init-download-worker', async (event, { concurrency }) => {
+  try {
+    // 如果 Worker 不可用，直接返回失败
+    if (!workerAvailable || !workerEnabled || !DownloadWorker) {
+      console.warn('[IPC Main] Cannot initialize worker pool: Worker Threads not available');
+      return { success: false, error: 'Worker Threads not available' };
+    }
+
+    // 如果已经初始化，更新配置
+    if (downloadWorker) {
+      console.log(`[IPC Main] Worker pool already initialized, updating concurrency to ${concurrency}`);
+      downloadWorker.config.workerCount = concurrency;
+      return { success: true };
+    }
+
+    // 创建工作线程池
+    downloadWorker = new DownloadWorker({
+      workerCount: concurrency,
+      maxConcurrentPerWorker: 3,
+      taskTimeout: 30000,
+      maxRetries: 3,
+    });
+
+    await downloadWorker.initialize();
+    console.log(`[IPC Main] DownloadWorker initialized successfully with ${concurrency} workers`);
+    return { success: true };
+  } catch (error) {
+    console.error('[IPC Main] Failed to initialize DownloadWorker:', error);
+    downloadWorker = null;
+    return { success: false, error: error.message };
+  }
+});
+
 // 批量下载任务（使用 Worker）
 ipcMain.handle('download-tiles-batch', async (event, args) => {
   // 检查 Worker 是否可用
@@ -264,8 +298,9 @@ export function ipcHandle(_win) {
           failOnError: false,
         });
 
+        // 修复：使用 item.url 而不是 args.url
         const bff = await new Promise((resolve, reject) => {
-          const req = request.get(args.url).set(getHeader());
+          const req = request.get(item.url).set(getHeader());
           const stream = req.pipe(sharpStream);
 
           stream.on('finish', () => {

@@ -137,7 +137,9 @@ export default defineComponent({
     },
     speedText() {
       if (!this.performanceStats) return '0';
-      return this.performanceStats.speed || '0';
+      const speed = this.performanceStats.speed || 0;
+      // 保留一位小数
+      return typeof speed === 'number' ? speed.toFixed(1) : speed;
     },
     activeThreadsText() {
       if (!this.performanceStats) return '0';
@@ -154,7 +156,9 @@ export default defineComponent({
     avgSpeedText() {
       if (!this.finalStats && !this.performanceStats) return '0';
       const stats = this.finalStats || this.performanceStats;
-      return stats.avgSpeed || '0';
+      const avgSpeed = stats.avgSpeed || 0;
+      // 保留一位小数
+      return typeof avgSpeed === 'number' ? avgSpeed.toFixed(1) : avgSpeed;
     },
     showFinalStats() {
       return !this.isDownloading && this.finalStats;
@@ -243,6 +247,8 @@ export default defineComponent({
       if (status.downloading !== undefined) {
         this.isDownloading = status.downloading;
         if (!status.downloading) {
+          // 下载完成或取消时，重置暂停状态
+          this.isPaused = false;
           const progress = getProgress();
           this.failedCount = progress.error || 0;
           this.showRetryButton = this.failedCount > 0;
