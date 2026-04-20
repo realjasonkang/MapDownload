@@ -14,11 +14,13 @@
 
 > V0.42版本win-unpacked压缩包 百度网盘链接：https://pan.baidu.com/s/1M12KnC8bIvyHo3ik3hxy9A   提取码：9986
 
-> 下载任务支持暂停、恢复、取消，支持失败任务重试和管理（收集任务失败瓦片，重新下载） V0.48
+> 下载任务支持暂停、恢复、取消，支持失败任务重试和管理（收集任务失败瓦片，重新下载） V0.48开始
 
-> 支持多线程并发下载
+> 支持多线程并发下载 V0.49Beta开始
 
 ![image](https://user-images.githubusercontent.com/14800641/154039927-e8994f36-523b-40cb-b184-46a7d8e1a9f2.png)
+<img width="439" height="526" alt="image" src="https://github.com/user-attachments/assets/00d0f959-7af9-44cb-a11f-1ccb4d49fb19" />
+<img width="706" height="437" alt="image" src="https://github.com/user-attachments/assets/b66e74c1-75f3-440f-9d95-d87a1863d72e" />
 
 
 ## Build Setup
