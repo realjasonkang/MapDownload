@@ -654,6 +654,12 @@ class DownloadWorker {
     const workerId = workerInfo.id;
     this.workers.delete(workerId);
 
+    // 修复内存泄漏：限制 Map 大小，清理旧记录
+    if (this.workerRestartCount.size > 50) {
+      const entries = Array.from(this.workerRestartCount.entries());
+      this.workerRestartCount = new Map(entries.slice(-25));
+    }
+
     // 检查重启次数
     const restartCount = this.workerRestartCount.get(workerId) || 0;
     if (restartCount < this.config.maxWorkerRestarts && !this.isShuttingDown) {

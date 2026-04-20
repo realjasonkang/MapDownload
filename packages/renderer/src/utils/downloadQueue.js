@@ -171,6 +171,11 @@ export class DownloadQueue {
       if (task.tileData && this.onTaskFailed) {
         this.onTaskFailed(task.tileData);
       }
+    } finally {
+      // 修复内存泄漏：显式清理任务引用，帮助 GC 回收大对象
+      // task.handler 是异步函数闭包，可能持有 tileData、downloadOption 等大对象
+      task.handler = null;
+      task.tileData = null;
     }
 
     this.statistics.completed++;

@@ -46,7 +46,8 @@ import { progressAddSuccess, progressAddError, notifyStatusChange } from './prog
 import { getFailedTilesManager } from './failedTilesManager';
 
 let currentFailedTaskId = null;
-let failedTilesQueue = [];
+// 修复内存泄漏：移除 failedTilesQueue 数组，直接使用 IndexedDB 存储
+// 避免与 IndexedDB 双重存储导致内存累积
 
 async function recordFailedTile(tileData, downloadOption) {
   if (!currentFailedTaskId) return;
@@ -68,15 +69,13 @@ async function recordFailedTile(tileData, downloadOption) {
     } : null,
   };
 
-  failedTilesQueue.push(record);
-
+  // 修复：直接写入 IndexedDB，不再维护本地数组
   const manager = getFailedTilesManager();
   manager.addFailedTilesBatch([record]);
 }
 
 async function flushFailedTiles() {
-  if (failedTilesQueue.length === 0) return;
-
+  // 修复：由于移除了 failedTilesQueue，直接刷新 IndexedDB 写入队列
   const manager = getFailedTilesManager();
   await manager.flushWriteQueue();
 }
@@ -85,7 +84,7 @@ export { flushFailedTiles };
 
 export function setCurrentFailedTaskId(taskId) {
   currentFailedTaskId = taskId;
-  failedTilesQueue = [];
+  // 修复：不再重置 failedTilesQueue
 }
 
 export function getCurrentFailedTaskId() {
@@ -94,11 +93,13 @@ export function getCurrentFailedTaskId() {
 
 export function clearCurrentFailedTaskId() {
   currentFailedTaskId = null;
-  failedTilesQueue = [];
+  // 修复：不再重置 failedTilesQueue
 }
 
 export function getFailedTilesCount() {
-  return failedTilesQueue.length;
+  // 修复：返回 null，因为不再维护本地计数
+  // 如需统计，应查询 IndexedDB
+  return null;
 }
 
 // 下载瓦片

@@ -10,6 +10,9 @@ export class ClipImage {
     this.map = null;
     this.vectorLayer = null;
     this.dom = null;
+    // 修复内存泄漏：跟踪 requestAnimationFrame ID 和当前 Promise
+    this._currentRafId = null;
+    this._currentImagePromise = null;
     this.createMap();
   }
 
@@ -65,6 +68,9 @@ export class ClipImage {
    * 解决地图实例内存累积问题
    */
   cleanup() {
+    // 修复内存泄漏：先取消进行中的 rAF 和 image 请求
+    this._cancelCurrentImageRequest();
+
     if (this.vectorLayer) {
       this.vectorLayer.clear();
       this.vectorLayer = null;
@@ -109,24 +115,70 @@ export class ClipImage {
   }
 
   getImage(imageType) {
-    return new Promise(resolve => {
+    // 修复内存泄漏：如果已有进行中的请求，先取消
+    this._cancelCurrentImageRequest();
+
+    let rafId = null;
+    let cancelled = false;
+
+    const promise = new Promise(resolve => {
       const isComplete = () => {
+        if (cancelled) {
+          resolve(null);
+          return;
+        }
+
         if (!this.map) {
           resolve(null);
           return;
         }
+
         const over = !this.map.isMoving() && !this.map.isZooming() && !this.map.isAnimating();
         if (!over) {
-          requestAnimationFrame(isComplete);
+          rafId = requestAnimationFrame(isComplete);
+          this._currentRafId = rafId;
         } else {
           const img = this.map.toDataURL({
             'mimeType' : 'image/' + imageType,
             'save' : false,
           });
+          this._currentRafId = null;
+          this._currentImagePromise = null;
           resolve(img);
         }
       };
-      requestAnimationFrame(isComplete);
+
+      rafId = requestAnimationFrame(isComplete);
+      this._currentRafId = rafId;
     });
+
+    // 保存当前 Promise 以便取消
+    this._currentImagePromise = promise;
+
+    // 添加取消方法
+    promise.cancel = () => {
+      cancelled = true;
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+      }
+      this._currentRafId = null;
+      this._currentImagePromise = null;
+    };
+
+    return promise;
+  }
+
+  /**
+   * 取消当前的图片请求
+   * @private
+   */
+  _cancelCurrentImageRequest() {
+    if (this._currentImagePromise && this._currentImagePromise.cancel) {
+      this._currentImagePromise.cancel();
+    }
+    if (this._currentRafId) {
+      cancelAnimationFrame(this._currentRafId);
+      this._currentRafId = null;
+    }
   }
 }

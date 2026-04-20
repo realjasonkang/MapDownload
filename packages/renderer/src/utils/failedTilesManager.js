@@ -340,7 +340,9 @@ class FailedTilesManager {
       await this._writeBatchToDb(batch);
     } catch (error) {
       console.error('批量写入失败瓦片记录失败:', error);
-      this.writeQueue.unshift(...batch);
+      // 修复内存泄漏：不在失败时重新入队，避免重复累积
+      // 数据已丢失，记录日志但不重试
+      console.warn('批量写入失败，数据已丢弃');
     }
 
     if (this.writeQueue.length > 0) {
@@ -358,11 +360,20 @@ class FailedTilesManager {
   async _writeBatchToDb(batch) {
     await this.ensureInit();
 
+    // 修复内存泄漏：去重，只保留每个 taskId+x+y+z 的最新记录
+    const uniqueMap = new Map();
+    batch.forEach((tileData) => {
+      const key = `${tileData.taskId}_${tileData.x}_${tileData.y}_${tileData.z}`;
+      uniqueMap.set(key, tileData);
+    });
+
+    const uniqueBatch = Array.from(uniqueMap.values());
+
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction([STORE_TILES], 'readwrite');
       const store = transaction.objectStore(STORE_TILES);
 
-      batch.forEach((tileData) => {
+      uniqueBatch.forEach((tileData) => {
         const record = {
           taskId: tileData.taskId,
           tileUrl: tileData.tileUrl || null,

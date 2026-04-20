@@ -125,18 +125,23 @@ function initPerformanceMonitor(maxThreads) {
  */
 function updatePerformanceMonitor(stats) {
   const now = Date.now();
-  
+
+  // 修复内存泄漏：先清理再添加，控制数组大小
+  const windowStart = now - performanceMonitor.speedWindowSize;
+  performanceMonitor.speedHistory = performanceMonitor.speedHistory.filter(
+    entry => entry.time >= windowStart
+  );
+
+  // 修复：限制最大条目数，防止极端情况下内存累积
+  if (performanceMonitor.speedHistory.length > 100) {
+    performanceMonitor.speedHistory = performanceMonitor.speedHistory.slice(-50);
+  }
+
   // 记录当前时间点和完成数到历史
   performanceMonitor.speedHistory.push({
     time: now,
     completed: stats.completed,
   });
-
-  // 清理超出窗口的历史记录
-  const windowStart = now - performanceMonitor.speedWindowSize;
-  performanceMonitor.speedHistory = performanceMonitor.speedHistory.filter(
-    entry => entry.time >= windowStart
-  );
 
   // 计算滑动窗口内的速度
   const history = performanceMonitor.speedHistory;
