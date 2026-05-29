@@ -129,7 +129,7 @@ function updatePerformanceMonitor(stats) {
   // 修复内存泄漏：先清理再添加，控制数组大小
   const windowStart = now - performanceMonitor.speedWindowSize;
   performanceMonitor.speedHistory = performanceMonitor.speedHistory.filter(
-    entry => entry.time >= windowStart
+    entry => entry.time >= windowStart,
   );
 
   // 修复：限制最大条目数，防止极端情况下内存累积
@@ -202,7 +202,7 @@ function getPerformanceStats() {
   // 清理超出窗口的历史记录
   const windowStart = now - performanceMonitor.speedWindowSize;
   performanceMonitor.speedHistory = performanceMonitor.speedHistory.filter(
-    entry => entry.time >= windowStart
+    entry => entry.time >= windowStart,
   );
 
   // 计算滑动窗口内的速度

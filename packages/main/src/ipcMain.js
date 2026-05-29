@@ -241,6 +241,17 @@ export function ipcHandle(_win) {
       const req = request.get(args.url).set(getHeader());
       const stream = req.pipe(sharpStream);
 
+      // 处理请求中止事件
+      req.on('aborted', () => {
+        console.error('[IPC Main] 请求被中止');
+        try {
+          fs.unlinkSync(savePath);
+        } catch {
+          // do nothing
+        }
+        resolve({ success: false, error: 'aborted' });
+      });
+
       stream.on('finish', () => {
         Promise.all(promises)
           .then(() => {
@@ -302,6 +313,11 @@ export function ipcHandle(_win) {
         const bff = await new Promise((resolve, reject) => {
           const req = request.get(item.url).set(getHeader());
           const stream = req.pipe(sharpStream);
+
+          // 处理请求中止事件
+          req.on('aborted', () => {
+            reject(new Error('aborted'));
+          });
 
           stream.on('finish', () => {
             sharpStream.toBuffer()

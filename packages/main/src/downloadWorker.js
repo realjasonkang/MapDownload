@@ -221,6 +221,13 @@ async function downloadImage(url, savePath, timeout) {
     const req = superagent.get(url).set(getHeader());
     const stream = req.pipe(sharpStream);
 
+    // 处理请求中止事件
+    req.on('aborted', () => {
+      clearTimeout(timeoutId);
+      cleanupFile(normalizedPath);
+      reject(new Error('aborted'));
+    });
+
     stream.on('finish', () => {
       clearTimeout(timeoutId);
       sharpStream
@@ -274,6 +281,13 @@ async function downloadImageWithMask(url, savePath, imageBuffer, timeout) {
 
     const req = superagent.get(url).set(getHeader());
     const stream = req.pipe(sharpStream);
+
+    // 处理请求中止事件
+    req.on('aborted', () => {
+      clearTimeout(timeoutId);
+      cleanupFile(normalizedPath);
+      reject(new Error('aborted'));
+    });
 
     stream.on('finish', () => {
       clearTimeout(timeoutId);
@@ -376,6 +390,12 @@ async function downloadImageToBuffer(url, timeout) {
 
     const req = superagent.get(url).set(getHeader());
     const stream = req.pipe(sharpStream);
+
+    // 处理请求中止事件
+    req.on('aborted', () => {
+      clearTimeout(timeoutId);
+      reject(new Error('aborted'));
+    });
 
     stream.on('finish', () => {
       clearTimeout(timeoutId);

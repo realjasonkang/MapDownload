@@ -7,6 +7,22 @@ import  { ipcHandle } from './ipcMain';
 const isSingleInstance = app.requestSingleInstanceLock();
 const isDevelopment = import.meta.env.MODE === 'development';
 
+// 全局错误处理，防止未捕获的异常导致应用崩溃
+process.on('uncaughtException', (error) => {
+  console.error('[Main] Uncaught Exception:', error);
+  // 对于网络相关的 "aborted" 错误，不退出应用，仅记录日志
+  if (error.message === 'aborted' || error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT') {
+    console.warn('[Main] Network error caught, app continues running');
+    return;
+  }
+  // 其他严重错误，记录日志但也不退出（避免影响用户体验）
+  console.error('[Main] Non-network error, continuing to run');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Main] Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 if (!isSingleInstance) {
   app.quit();
   process.exit(0);
