@@ -135,6 +135,11 @@ function runWorker() {
         }
         break;
 
+      case MessageType.TASK_CANCEL:
+        // 任务超时/取消。executeTask 为异步无法强制中断，记录日志避免误判
+        console.warn(`[Worker ${workerId}] TASK_CANCEL received taskId=${taskId}`);
+        break;
+
       case MessageType.SHUTDOWN:
         process.exit(0);
         break;
@@ -201,6 +206,48 @@ async function executeTask(data, taskId, workerId) {
 }
 
 /**
+ * 非流式下载图片并返回 Buffer
+ * 不使用 superagent.pipe(sharp) 流式路径：sharp 作为 pipe 目标处理部分
+ * 响应（如天地图 chunked JPEG）时会卡死并阻塞事件循环，改用 buffer 方式已验证正常
+ * @param {string} url 图片URL
+ * @param {number} timeout 超时时间
+ * @returns {Promise<Buffer>} 图片数据
+ */
+function fetchBuffer(url, timeout) {
+  return new Promise((resolve, reject) => {
+    const req = superagent.get(url).set(getHeader()).buffer(true);
+
+    const timeoutId = setTimeout(() => {
+      req.abort();
+      reject(new Error(`Download timeout for ${url}`));
+    }, timeout);
+
+    req.on('aborted', () => {
+      clearTimeout(timeoutId);
+      reject(new Error('aborted'));
+    });
+
+    req.on('error', (err) => {
+      clearTimeout(timeoutId);
+      reject(err);
+    });
+
+    req.parse((res, callback) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => callback(null, Buffer.concat(chunks)));
+    }).end((err, res) => {
+      clearTimeout(timeoutId);
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(res.body);
+    });
+  });
+}
+
+/**
  * 下载图片
  * @param {string} url 图片URL
  * @param {string} savePath 保存路径
@@ -209,51 +256,14 @@ async function executeTask(data, taskId, workerId) {
  */
 async function downloadImage(url, savePath, timeout) {
   const normalizedPath = path.normalize(savePath);
-  const sharpStream = sharp({
-    failOnError: false,
-  });
-
-  return new Promise((resolve, reject) => {
-    const timeoutId = setTimeout(() => {
-      reject(new Error(`Download timeout for ${url}`));
-    }, timeout);
-
-    const req = superagent.get(url).set(getHeader());
-    const stream = req.pipe(sharpStream);
-
-    // 处理请求中止事件
-    req.on('aborted', () => {
-      clearTimeout(timeoutId);
-      cleanupFile(normalizedPath);
-      reject(new Error('aborted'));
-    });
-
-    stream.on('finish', () => {
-      clearTimeout(timeoutId);
-      sharpStream
-        .toFile(normalizedPath)
-        .then(() => {
-          resolve({ success: true, path: normalizedPath });
-        })
-        .catch((err) => {
-          cleanupFile(normalizedPath);
-          reject(err);
-        });
-    });
-
-    stream.on('error', (err) => {
-      clearTimeout(timeoutId);
-      req.abort();
-      cleanupFile(normalizedPath);
-      reject(err);
-    });
-
-    req.on('error', (err) => {
-      clearTimeout(timeoutId);
-      cleanupFile(normalizedPath);
-      reject(err);
-    });
-  });
+  try {
+    const data = await fetchBuffer(url, timeout);
+    await sharp(data, { failOnError: false }).toFile(normalizedPath);
+    return { success: true, path: normalizedPath };
+  } catch (error) {
+    cleanupFile(normalizedPath);
+    throw error;
+  }
 }
 
 /**
@@ -266,56 +276,20 @@ async function downloadImage(url, savePath, timeout) {
  */
 async function downloadImageWithMask(url, savePath, imageBuffer, timeout) {
   const normalizedPath = path.normalize(savePath);
-  const sharpStream = sharp({
-    failOnError: false,
-  });
+  try {
+    // 解析 Base64 遮罩图片
+    const base64Data = imageBuffer.replace(/^data:image\/\w+;base64,/, '');
+    const maskBuffer = Buffer.from(base64Data, 'base64');
 
-  // 解析 Base64 遮罩图片
-  const base64Data = imageBuffer.replace(/^data:image\/\w+;base64,/, '');
-  const maskBuffer = Buffer.from(base64Data, 'base64');
-
-  return new Promise((resolve, reject) => {
-    const timeoutId = setTimeout(() => {
-      reject(new Error(`Download timeout for ${url}`));
-    }, timeout);
-
-    const req = superagent.get(url).set(getHeader());
-    const stream = req.pipe(sharpStream);
-
-    // 处理请求中止事件
-    req.on('aborted', () => {
-      clearTimeout(timeoutId);
-      cleanupFile(normalizedPath);
-      reject(new Error('aborted'));
-    });
-
-    stream.on('finish', () => {
-      clearTimeout(timeoutId);
-      sharpStream
-        .composite([{ input: maskBuffer, gravity: 'centre', blend: 'dest-in' }])
-        .toFile(normalizedPath)
-        .then(() => {
-          resolve({ success: true, path: normalizedPath });
-        })
-        .catch((err) => {
-          cleanupFile(normalizedPath);
-          reject(err);
-        });
-    });
-
-    stream.on('error', (err) => {
-      clearTimeout(timeoutId);
-      req.abort();
-      cleanupFile(normalizedPath);
-      reject(err);
-    });
-
-    req.on('error', (err) => {
-      clearTimeout(timeoutId);
-      cleanupFile(normalizedPath);
-      reject(err);
-    });
-  });
+    const data = await fetchBuffer(url, timeout);
+    await sharp(data, { failOnError: false })
+      .composite([{ input: maskBuffer, gravity: 'centre', blend: 'dest-in' }])
+      .toFile(normalizedPath);
+    return { success: true, path: normalizedPath };
+  } catch (error) {
+    cleanupFile(normalizedPath);
+    throw error;
+  }
 }
 
 /**
@@ -367,6 +341,7 @@ async function downloadAndMergeImages(layers, savePath, imageBuffer, timeout) {
     await operation.toFile(normalizedPath);
     return { success: true, path: normalizedPath };
   } catch (error) {
+    console.error('[DownloadWorker] MERGE failed:', error.message);
     cleanupFile(normalizedPath);
     throw error;
   }
@@ -379,40 +354,8 @@ async function downloadAndMergeImages(layers, savePath, imageBuffer, timeout) {
  * @returns {Promise<Buffer>} 图片 Buffer
  */
 async function downloadImageToBuffer(url, timeout) {
-  const sharpStream = sharp({
-    failOnError: false,
-  });
-
-  return new Promise((resolve, reject) => {
-    const timeoutId = setTimeout(() => {
-      reject(new Error(`Download timeout for ${url}`));
-    }, timeout);
-
-    const req = superagent.get(url).set(getHeader());
-    const stream = req.pipe(sharpStream);
-
-    // 处理请求中止事件
-    req.on('aborted', () => {
-      clearTimeout(timeoutId);
-      reject(new Error('aborted'));
-    });
-
-    stream.on('finish', () => {
-      clearTimeout(timeoutId);
-      sharpStream.toBuffer().then(resolve).catch(reject);
-    });
-
-    stream.on('error', (err) => {
-      clearTimeout(timeoutId);
-      req.abort();
-      reject(err);
-    });
-
-    req.on('error', (err) => {
-      clearTimeout(timeoutId);
-      reject(err);
-    });
-  });
+  const data = await fetchBuffer(url, timeout);
+  return sharp(data, { failOnError: false }).toBuffer();
 }
 
 /**
@@ -557,6 +500,10 @@ class DownloadWorker {
 
       case MessageType.WORKER_ERROR:
         console.error(`[Worker ${workerInfo.id}] Worker error:`, error);
+        break;
+
+      case MessageType.WORKER_READY:
+        // 已由 readyHandler 处理，这里忽略
         break;
 
       default:

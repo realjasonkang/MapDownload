@@ -6,7 +6,7 @@ import { DownloadQueue } from './downloadQueue';
 import { MemoryMonitor } from './memoryMonitor';
 import { TaskManager } from './taskManager';
 import { getFailedTilesManager } from './failedTilesManager';
-import { getDownloadConcurrency } from './config';
+import { getDownloadConcurrency, getMergeConcurrency } from './config';
 
 let currentQueue = null;
 let currentTaskId = null;
@@ -21,6 +21,18 @@ let downloadController = {
 const CLIPIMAGE = new ClipImage();
 
 const CLIPIMAGE_RECREATE_INTERVAL = 500;
+
+// 分批喂入队列时每批的瓦片数量，避免一次性生成大量任务对象导致内存暴涨
+const DEFAULT_BATCH_SIZE = 500;
+
+/**
+ * 判断是否为生成器/迭代器
+ * @param {*} value
+ * @returns {boolean}
+ */
+function isGenerator(value) {
+  return !!(value && typeof value.next === 'function');
+}
 
 // 性能监控相关变量
 let performanceMonitor = {
@@ -310,7 +322,8 @@ export function downloadLoop(list, apiDownload, taskConfig = null, onTileFailed 
   downloadController.cancelled = false;
   downloadController.paused = false;
 
-  if (!Array.isArray(list)) {
+  const useGenerator = isGenerator(list);
+  if (!useGenerator && !Array.isArray(list)) {
     window.$message.error('下载失败：瓦片列表格式错误');
     return;
   }
@@ -320,14 +333,19 @@ export function downloadLoop(list, apiDownload, taskConfig = null, onTileFailed 
     return;
   }
 
-  const length = list.length;
-  if (length === 0) {
+  if (!useGenerator && list.length === 0) {
     window.$message.warning('没有需要下载的瓦片');
     return;
   }
 
+  const totalLength = useGenerator ? null : list.length;
+
   // 获取并发度配置
-  const downloadConcurrency = concurrency || getDownloadConcurrency();
+  // 合并任务单瓦片需下载多个图层并执行 sharp 合成，负载远高于普通下载，
+  // 使用更低的并发度，避免大量合成操作同时进行导致卡死
+  const downloadConcurrency = taskConfig && taskConfig.mergeLayers
+    ? getMergeConcurrency()
+    : concurrency || getDownloadConcurrency();
 
   // 初始化工作线程池
   initWorkerPool(downloadConcurrency).catch((err) => {
@@ -337,13 +355,13 @@ export function downloadLoop(list, apiDownload, taskConfig = null, onTileFailed 
   // 初始化性能监控
   initPerformanceMonitor(downloadConcurrency);
 
-  const statistics = { success: 0, error: 0, percentage: 0, count: length };
+  const statistics = { success: 0, error: 0, percentage: 0, count: totalLength };
   const failedTiles = [];
 
   if (taskConfig) {
     const task = getTaskManager().createTask({
       ...taskConfig,
-      totalTiles: length,
+      totalTiles: totalLength,
     });
     currentTaskId = task.id;
     getTaskManager().startTask(currentTaskId);
@@ -400,11 +418,12 @@ export function downloadLoop(list, apiDownload, taskConfig = null, onTileFailed 
         memoryMonitor.stop();
       }
 
-      if (failedTiles.length > 0 && currentFailedTaskId) {
+      if (currentFailedTaskId) {
         await getFailedManager().flushWriteQueue();
         await getFailedManager().updateFailedTask(currentFailedTaskId, {
-          failedCount: failedTiles.length,
+          totalTiles: stats.total,
           successCount: stats.success,
+          failedCount: failedTiles.length,
         });
       }
 
@@ -443,12 +462,58 @@ export function downloadLoop(list, apiDownload, taskConfig = null, onTileFailed 
     },
   });
 
-  const tasks = list.map((item) => ({
+  const batchState = { offset: 0 };
+
+  const takeBatch = () => {
+    const batch = [];
+    if (useGenerator) {
+      for (let i = 0; i < DEFAULT_BATCH_SIZE; i++) {
+        const next = list.next();
+        if (next.done) break;
+        batch.push(next.value);
+      }
+    } else {
+      const end = Math.min(batchState.offset + DEFAULT_BATCH_SIZE, list.length);
+      for (let i = batchState.offset; i < end; i++) {
+        batch.push(list[i]);
+      }
+      batchState.offset = end;
+    }
+    return batch;
+  };
+
+  const makeTasks = (batch) => batch.map((item) => ({
     handler: () => apiDownload(item),
     tileData: item,
   }));
 
-  currentQueue.add(tasks);
+  const firstBatch = takeBatch();
+  if (firstBatch.length === 0) {
+    if (currentTaskId) {
+      getTaskManager().cancelTask(currentTaskId);
+      currentTaskId = null;
+    }
+    window.$message.warning('没有需要下载的瓦片');
+    return;
+  }
+
+  // 分批喂入剩余任务：控制队列中的任务数量，避免一次性加载全部瓦片导致内存暴涨
+  const feedNext = () => {
+    if (downloadController.cancelled || !currentQueue || currentQueue.cancelled) {
+      return;
+    }
+    if (currentQueue.queue.length >= DEFAULT_BATCH_SIZE * 4) {
+      setTimeout(feedNext, 50);
+      return;
+    }
+    const batch = takeBatch();
+    if (batch.length === 0) {
+      return;
+    }
+    currentQueue.add(makeTasks(batch));
+    setTimeout(feedNext, 0);
+  };
+
   setState(true);
   getMemoryMonitor().start();
 
@@ -457,20 +522,23 @@ export function downloadLoop(list, apiDownload, taskConfig = null, onTileFailed 
     getFailedManager().createFailedTask({
       taskId: currentFailedTaskId,
       taskConfig,
-      totalTiles: length,
+      totalTiles: totalLength,
     }).catch((err) => {
       console.error('创建失败任务记录失败:', err);
     });
   }
 
+  currentQueue.add(makeTasks(firstBatch));
   currentQueue.start();
+  feedNext();
 }
 
 export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry, imageType, taskConfig = null, onTileFailed = null, concurrency = null) {
   downloadController.cancelled = false;
   downloadController.paused = false;
 
-  if (!Array.isArray(list)) {
+  const useGenerator = isGenerator(list);
+  if (!useGenerator && !Array.isArray(list)) {
     window.$message.error('下载失败：瓦片列表格式错误');
     return;
   }
@@ -480,14 +548,18 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
     return;
   }
 
-  const length = list.length;
-  if (length === 0) {
+  if (!useGenerator && list.length === 0) {
     window.$message.warning('没有需要下载的瓦片');
     return;
   }
 
+  const totalLength = useGenerator ? null : list.length;
+
   // 获取并发度配置（裁切下载默认使用较低的并发度）
-  const downloadConcurrency = concurrency || getDownloadConcurrency();
+  // 合并任务单瓦片需下载多个图层并执行 sharp 合成，使用更低的并发度避免卡死
+  const downloadConcurrency = taskConfig && taskConfig.mergeLayers
+    ? getMergeConcurrency()
+    : concurrency || getDownloadConcurrency();
 
   // 初始化工作线程池
   initWorkerPool(downloadConcurrency).catch((err) => {
@@ -503,13 +575,13 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
   const fullExtent = spatialReference.getFullExtent();
   const code = prj.code;
 
-  const statistics = { success: 0, error: 0, percentage: 0, count: length };
+  const statistics = { success: 0, error: 0, percentage: 0, count: totalLength };
   const failedTiles = [];
 
   if (taskConfig) {
     const task = getTaskManager().createTask({
       ...taskConfig,
-      totalTiles: length,
+      totalTiles: totalLength,
       clipImage: true,
     });
     currentTaskId = task.id;
@@ -569,11 +641,12 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
 
       CLIPIMAGE.cleanup();
 
-      if (failedTiles.length > 0 && currentFailedTaskId) {
+      if (currentFailedTaskId) {
         await getFailedManager().flushWriteQueue();
         await getFailedManager().updateFailedTask(currentFailedTaskId, {
-          failedCount: failedTiles.length,
+          totalTiles: stats.total,
           successCount: stats.success,
+          failedCount: failedTiles.length,
         });
       }
 
@@ -612,7 +685,27 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
     },
   });
 
-  const tasks = list.map((item) => ({
+  const batchState = { offset: 0 };
+
+  const takeBatch = () => {
+    const batch = [];
+    if (useGenerator) {
+      for (let i = 0; i < DEFAULT_BATCH_SIZE; i++) {
+        const next = list.next();
+        if (next.done) break;
+        batch.push(next.value);
+      }
+    } else {
+      const end = Math.min(batchState.offset + DEFAULT_BATCH_SIZE, list.length);
+      for (let i = batchState.offset; i < end; i++) {
+        batch.push(list[i]);
+      }
+      batchState.offset = end;
+    }
+    return batch;
+  };
+
+  const makeTasks = (batch) => batch.map((item) => ({
     handler: async () => {
       const relation = judgeTile(downloadGeometry, {
         width,
@@ -629,8 +722,7 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
       } else if (relation === 2) {
         return true;
       } else if (typeof relation === 'object') {
-        CLIPIMAGE.addTempGeometry(relation.intersection, relation.rect);
-        const imageBuffer = await CLIPIMAGE.getImage(imageType);
+        const imageBuffer = await CLIPIMAGE.generateClipImage(relation.intersection, relation.rect, imageType);
         item.imageBuffer = imageBuffer;
         return apiDownload(item);
       }
@@ -639,7 +731,33 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
     tileData: item,
   }));
 
-  currentQueue.add(tasks);
+  const firstBatch = takeBatch();
+  if (firstBatch.length === 0) {
+    if (currentTaskId) {
+      getTaskManager().cancelTask(currentTaskId);
+      currentTaskId = null;
+    }
+    window.$message.warning('没有需要下载的瓦片');
+    return;
+  }
+
+  // 分批喂入剩余任务：控制队列中的任务数量，避免一次性加载全部瓦片导致内存暴涨
+  const feedNext = () => {
+    if (downloadController.cancelled || !currentQueue || currentQueue.cancelled) {
+      return;
+    }
+    if (currentQueue.queue.length >= DEFAULT_BATCH_SIZE * 4) {
+      setTimeout(feedNext, 50);
+      return;
+    }
+    const batch = takeBatch();
+    if (batch.length === 0) {
+      return;
+    }
+    currentQueue.add(makeTasks(batch));
+    setTimeout(feedNext, 0);
+  };
+
   setState(true);
   getMemoryMonitor().start();
 
@@ -648,13 +766,15 @@ export function downloadClipLoop(list, apiDownload, tileLayer, downloadGeometry,
     getFailedManager().createFailedTask({
       taskId: currentFailedTaskId,
       taskConfig,
-      totalTiles: length,
+      totalTiles: totalLength,
     }).catch((err) => {
       console.error('创建失败任务记录失败:', err);
     });
   }
 
+  currentQueue.add(makeTasks(firstBatch));
   currentQueue.start();
+  feedNext();
 }
 
 export async function downloadImage(tile, downloadOption) {
@@ -716,9 +836,7 @@ async function _downloadClipImage(tile, downloadOption) {
   } else if (relation === 2) {
     return true;
   } else if (typeof relation === 'object') {
-    CLIPIMAGE.addTempGeometry(relation.intersection, relation.rect);
-    const imageBuffer = await CLIPIMAGE.getImage(imageType);
-
+    const imageBuffer = await CLIPIMAGE.generateClipImage(relation.intersection, relation.rect, imageType);
     const temppath = downloadPath + item.z + '/' + item.x;
     window.electron.ipcRenderer.send('ensure-dir', temppath);
     const savePath = temppath + '/' + item.y + pictureType;
@@ -888,7 +1006,7 @@ async function retryDownloadTile(tile) {
         savePath: tile.savePath,
       };
       const result = await window.electron.ipcRenderer.invoke('save-image-merge', param);
-      return result.success;
+      return !!(result && result.success);
     } else if (tile.downloadType === 'clip' && tile.clipData) {
       if (tile.clipData.relation === 1) {
         ensureDir(tile.savePath);
@@ -899,8 +1017,7 @@ async function retryDownloadTile(tile) {
         return true;
       } else if (tile.clipData.relation === 3) {
         ensureDir(tile.savePath);
-        CLIPIMAGE.addTempGeometry(tile.clipData.intersection, tile.clipData.rect);
-        const imageBuffer = await CLIPIMAGE.getImage('png');
+        const imageBuffer = await CLIPIMAGE.generateClipImage(tile.clipData.intersection, tile.clipData.rect, 'png');
         const param = { zoom: tile.z, url: tile.tileUrl, savePath: tile.savePath, x: tile.x, y: tile.y, imageBuffer };
         const result = await window.electron.ipcRenderer.invoke('save-image', param);
         return result.success;

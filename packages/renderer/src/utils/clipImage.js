@@ -13,6 +13,9 @@ export class ClipImage {
     // 修复内存泄漏：跟踪 requestAnimationFrame ID 和当前 Promise
     this._currentRafId = null;
     this._currentImagePromise = null;
+    // 串行化队列：保证同一时刻只有一个裁切任务操作地图，避免并发 addTempGeometry/setCenterAndZoom 互相打断导致 getImage 永久等待
+    this._lock = Promise.resolve();
+    this._timeoutId = null;
     this.createMap();
   }
 
@@ -94,6 +97,25 @@ export class ClipImage {
     this.createMap();
   }
 
+  /**
+   * 串行化裁剪操作：addTempGeometry + getImage 原子执行
+   * 多任务并发下载时，必须保证同一时刻只有一个任务操作地图，
+   * 否则并发 setCenterAndZoom 会使地图持续运动，getImage 的等待循环永不结束
+   * @param {Object} intersection 相交几何
+   * @param {Object} rect 矩形范围
+   * @param {string} imageType 图片类型
+   * @returns {Promise<string>} Base64 图片
+   */
+  generateClipImage(intersection, rect, imageType) {
+    const task = () => {
+      this.addTempGeometry(intersection, rect);
+      return this.getImage(imageType);
+    };
+    const run = this._lock.then(task);
+    this._lock = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
   addTempGeometry(intersection, rect) {
     if (!this.vectorLayer) {
       this.createMap();
@@ -118,10 +140,15 @@ export class ClipImage {
     // 修复内存泄漏：如果已有进行中的请求，先取消
     this._cancelCurrentImageRequest();
 
-    let rafId = null;
     let cancelled = false;
 
+    // 使用 setTimeout 而非 requestAnimationFrame：
+    // 1) rAF 在页面隐藏/后台/最小化时会暂停，导致等待循环永不结束、下载卡死
+    // 2) 加入最大等待次数兜底，即使地图因异常持续动画，也能强制截图返回，避免永久挂起
     const promise = new Promise(resolve => {
+      let tries = 0;
+      const MAX_TRIES = 100;
+
       const isComplete = () => {
         if (cancelled) {
           resolve(null);
@@ -134,22 +161,22 @@ export class ClipImage {
         }
 
         const over = !this.map.isMoving() && !this.map.isZooming() && !this.map.isAnimating();
-        if (!over) {
-          rafId = requestAnimationFrame(isComplete);
-          this._currentRafId = rafId;
-        } else {
-          const img = this.map.toDataURL({
-            'mimeType' : 'image/' + imageType,
-            'save' : false,
-          });
-          this._currentRafId = null;
-          this._currentImagePromise = null;
-          resolve(img);
+        if (!over && tries < MAX_TRIES) {
+          tries++;
+          this._timeoutId = setTimeout(isComplete, 50);
+          return;
         }
+
+        this._timeoutId = null;
+        this._currentImagePromise = null;
+        const img = this.map.toDataURL({
+          'mimeType' : 'image/' + imageType,
+          'save' : false,
+        });
+        resolve(img);
       };
 
-      rafId = requestAnimationFrame(isComplete);
-      this._currentRafId = rafId;
+      this._timeoutId = setTimeout(isComplete, 30);
     });
 
     // 保存当前 Promise 以便取消
@@ -158,8 +185,9 @@ export class ClipImage {
     // 添加取消方法
     promise.cancel = () => {
       cancelled = true;
-      if (rafId) {
-        cancelAnimationFrame(rafId);
+      if (this._timeoutId) {
+        clearTimeout(this._timeoutId);
+        this._timeoutId = null;
       }
       this._currentRafId = null;
       this._currentImagePromise = null;
@@ -175,6 +203,10 @@ export class ClipImage {
   _cancelCurrentImageRequest() {
     if (this._currentImagePromise && this._currentImagePromise.cancel) {
       this._currentImagePromise.cancel();
+    }
+    if (this._timeoutId) {
+      clearTimeout(this._timeoutId);
+      this._timeoutId = null;
     }
     if (this._currentRafId) {
       cancelAnimationFrame(this._currentRafId);

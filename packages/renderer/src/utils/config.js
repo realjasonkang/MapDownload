@@ -132,6 +132,18 @@ export function resetDownloadConcurrency() {
 }
 
 /**
+ * 获取合并下载并发度配置
+ * 合并任务每个瓦片需下载多个图层并执行 sharp 合成，负载远高于普通下载，
+ * 因此使用比普通并发更低的并发度，避免大量合成操作同时进行导致卡死。
+ *
+ * @returns {number} 合并下载并发度（1-16）
+ */
+export function getMergeConcurrency() {
+  const base = getDownloadConcurrency();
+  return Math.max(1, Math.min(4, Math.floor(base / 2)));
+}
+
+/**
  * 获取并发度配置范围信息
  *
  * @returns {Object} 包含最小值、最大值、默认值等信息的对象

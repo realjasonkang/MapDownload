@@ -6,6 +6,14 @@ import { getFailedTilesManager } from './failedTilesManager';
 import { setCurrentFailedTaskId, clearCurrentFailedTaskId, getFailedTilesCount, flushFailedTiles } from './downloadCascadeTiles';
 import { getDownloadConcurrency } from './config';
 
+function long2tile(lon, zoom) {
+  return (Math.floor((lon + 180) / 360 * Math.pow(2, zoom)));
+}
+
+function lat2tileGoogle(lat, zoom) {
+  return (Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom)));
+}
+
 export class TileTMS {
   constructor(data) {
     this.rootPath = data.savePath;
@@ -292,6 +300,7 @@ export class TileTMSListMerge {
       imageType: data.imageType,
       mergeLayers: true,
     };
+    setMapLoading(false);
 
     if (data.clipImage) {
       downloadClipLoop(list, apiDownload, this.tileLayer[0], data.downloadGeometry, this.imageType, taskConfig);
@@ -299,49 +308,53 @@ export class TileTMSListMerge {
       downloadLoop(list, apiDownload, taskConfig);
     }
   }
-  calcTiles() {
+  *calcTiles() {
     const downloadPath = this.rootPath + '/';
     const zmin = this.minZoom;
     const zmax = this.maxZoom + 1;
     const pictureType = '.' + this.imageType;
+    const south_edge = this.mapExtent.ymin;
+    const north_edge = this.mapExtent.ymax;
+    const west_edge = this.mapExtent.xmin;
+    const east_edge = this.mapExtent.xmax;
 
     const imgLyr = this.tileLayer.find(t => { return !t.config().style.includes('_Label'); });
     const imgLyrLabel = this.tileLayer.find(t => { return t.config().style.includes('_Label'); });
-    const storeMap = {};
     for (let z = zmin; z < zmax; z++) {
-      const tileGridsList = imgLyr._getCascadeTiles(z).tileGrids;
-      tileGridsList.forEach(tileGrids => {
-        for (let x = 0; x < tileGrids.tiles.length; x++) {
-          const tile = tileGrids.tiles[x];
-          const temppath = downloadPath + tile.z + '/' + tile.x;
-          this.apiEnsureDirSync(temppath);
-          const savePath = temppath + '/' + tile.y + pictureType;
-
-          storeMap[`${tile.x}${tile.y}${tile.z}`] = {zoom: tile.z, layers:[
-            {
-              url: tile.url,
-              isLabel: false,
-            },
-          ], savePath, x:tile.x, y:tile.y, z: tile.z, downloadType: 'merge'};
+      const top_tile = lat2tileGoogle(north_edge, z);
+      const left_tile = long2tile(west_edge, z);
+      const bottom_tile = lat2tileGoogle(south_edge, z);
+      const right_tile = long2tile(east_edge, z);
+      const tileCount = Math.pow(2, z);
+      const minLong = Math.max(0, Math.min(tileCount - 1, Math.min(left_tile, right_tile)));
+      const maxLong = Math.max(0, Math.min(tileCount - 1, Math.max(left_tile, right_tile)));
+      const minLat = Math.max(0, Math.min(tileCount - 1, Math.min(bottom_tile, top_tile)));
+      const maxLat = Math.max(0, Math.min(tileCount - 1, Math.max(bottom_tile, top_tile)));
+      for (let x = minLong; x <= maxLong; x++) {
+        const temppath = downloadPath + z + '/' + x;
+        this.apiEnsureDirSync(temppath);
+        for (let y = minLat; y <= maxLat; y++) {
+          const savePath = temppath + '/' + y + pictureType;
+          yield {
+            zoom: z,
+            layers: [
+              {
+                url: imgLyr.getTileUrl(x, y, z),
+                isLabel: false,
+              },
+              {
+                url: imgLyrLabel.getTileUrl(x, y, z),
+                isLabel: true,
+              },
+            ],
+            savePath,
+            x,
+            y,
+            z,
+            downloadType: 'merge',
+          };
         }
-      });
+      }
     }
-    for (let z = zmin; z < zmax; z++) {
-      const tileGridsList = imgLyrLabel._getCascadeTiles(z).tileGrids;
-      tileGridsList.forEach(tileGrids => {
-        for (let x = 0; x < tileGrids.tiles.length; x++) {
-          const tile = tileGrids.tiles[x];
-          const key = `${tile.x}${tile.y}${tile.z}`;
-          if (storeMap[key]) {
-            storeMap[key].layers.push({
-              url: tile.url,
-              isLabel: true,
-            });
-          }
-        }
-      });
-    }
-    setMapLoading(false);
-    return Object.values(storeMap);
   }
 }

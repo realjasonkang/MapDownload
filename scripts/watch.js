@@ -3,6 +3,8 @@
 const {createServer, build, createLogger} = require('vite');
 const electronPath = require('electron');
 const {spawn} = require('child_process');
+const esbuild = require('esbuild');
+const chokidar = require('chokidar');
 
 
 /** @type 'production' | 'development'' */
@@ -45,6 +47,24 @@ const getWatcher = ({name, configFile, writeBundle}) => {
 
 
 /**
+ * 构建 downloadWorker 为独立 CJS 文件
+ * 主进程通过 require('./downloadWorker') 动态加载它并作为 worker 线程入口，
+ * 必须输出到 dist 目录，否则运行时 require 找不到模块导致 worker 模式被禁用
+ */
+async function buildDownloadWorker() {
+  await esbuild.build({
+    entryPoints: ['packages/main/src/downloadWorker.js'],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node16',
+    external: ['sharp', 'superagent', 'fs-extra'],
+    outfile: 'packages/main/dist/downloadWorker.js',
+    sourcemap: 'inline',
+  });
+}
+
+/**
  * Start or restart App when source files are changed
  * @param {import('vite').ViteDevServer} viteDevServer
  * @returns {Promise<import('vite').RollupOutput | Array<import('vite').RollupOutput> | import('vite').RollupWatcher>}
@@ -69,7 +89,14 @@ const setupMainPackageWatcher = (viteDevServer) => {
   return getWatcher({
     name: 'reload-app-on-main-package-change',
     configFile: 'packages/main/vite.config.js',
-    writeBundle() {
+    async writeBundle() {
+      // vite 构建会清空 dist，必须在 electron 启动前重新生成独立 downloadWorker 文件
+      try {
+        await buildDownloadWorker();
+      } catch (e) {
+        logger.error(`Failed to build downloadWorker: ${e.message}`, { timestamp: true });
+      }
+
       if (spawnProcess !== null) {
         spawnProcess.kill('SIGINT');
         spawnProcess = null;
@@ -118,6 +145,12 @@ const setupPreloadPackageWatcher = (viteDevServer) => {
 
     await setupPreloadPackageWatcher(viteDevServer);
     await setupMainPackageWatcher(viteDevServer);
+
+    // downloadWorker 通过 require('./downloadWorker') 动态加载，不在 vite 构建图内，
+    // 需要单独监听其源码变化并重建
+    chokidar.watch('packages/main/src/downloadWorker.js').on('change', () => {
+      buildDownloadWorker().catch((e) => console.error('[main] Failed to rebuild downloadWorker:', e));
+    });
   } catch (e) {
     console.error(e);
     process.exit(1);

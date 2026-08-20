@@ -24,13 +24,18 @@ export default class FileSave{
 
   }
   // 保存图片并合并
-  saveImagesAndMerge(param) {
+  async saveImagesAndMerge(param) {
     // const param = {
     //   layers: [{url:'https://map.geoq.cn/MapServer/tile/9/207/421',isLabel: true}],
     //   savePath: '',
     // };
-    window.electron.ipcRenderer.send('save-image-merge', param);
-
+    try {
+      const result = await window.electron.ipcRenderer.invoke('save-image-merge', param);
+      return !!(result && result.success);
+    } catch (error) {
+      console.error('合并下载图片错误:', error);
+      return false;
+    }
   }
   ensureDirSync(path) {
     window.electron.ipcRenderer.send('ensure-dir', path);

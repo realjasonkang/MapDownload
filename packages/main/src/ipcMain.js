@@ -42,6 +42,37 @@ if (workerAvailable) {
 }
 
 /**
+ * 按 customTaskId 分发 worker 任务结果的回调表
+ * 修复并发任务相互覆盖 onTaskComplete/onTaskError 回调导致结果丢失、渲染进程永久等待的问题
+ */
+const workerTaskResolvers = new Map();
+
+/**
+ * 设置 worker 全局任务完成/错误回调（一次性设置，避免并发任务互相覆盖回调链）
+ * @param {DownloadWorker} worker 下载工作线程管理器
+ */
+function setupWorkerCallbacks(worker) {
+  worker.setOnTaskComplete((taskData, result) => {
+    if (taskData && taskData.customTaskId) {
+      const resolve = workerTaskResolvers.get(taskData.customTaskId);
+      if (resolve) {
+        workerTaskResolvers.delete(taskData.customTaskId);
+        resolve(result);
+      }
+    }
+  });
+  worker.setOnTaskError((taskData, error) => {
+    if (taskData && taskData.customTaskId) {
+      const resolve = workerTaskResolvers.get(taskData.customTaskId);
+      if (resolve) {
+        workerTaskResolvers.delete(taskData.customTaskId);
+        resolve({ success: false, error: (error && error.message) || 'Unknown error' });
+      }
+    }
+  });
+}
+
+/**
  * 获取或创建 Worker 实例
  * @returns {Promise<DownloadWorker|null>}
  */
@@ -59,6 +90,7 @@ async function getDownloadWorker() {
         maxRetries: 3,
       });
       await downloadWorker.initialize();
+      setupWorkerCallbacks(downloadWorker);
       console.log('[IPC Main] DownloadWorker initialized successfully');
     } catch (error) {
       console.error('[IPC Main] Failed to initialize DownloadWorker:', error);
@@ -143,6 +175,7 @@ ipcMain.handle('init-download-worker', async (event, { concurrency }) => {
     });
 
     await downloadWorker.initialize();
+    setupWorkerCallbacks(downloadWorker);
     console.log(`[IPC Main] DownloadWorker initialized successfully with ${concurrency} workers`);
     return { success: true };
   } catch (error) {
@@ -211,84 +244,75 @@ ipcMain.handle('shutdown-worker', async () => {
 export function ipcHandle(_win) {
 
   /**
+   * 非流式下载图片并返回 Buffer
+   * 不使用 superagent.pipe(sharp) 流式路径：sharp 作为 pipe 目标处理部分
+   * 响应（如天地图 chunked JPEG）时会卡死并阻塞事件循环，改用 buffer 方式已验证正常
+   * @param {string} url 图片URL
+   * @param {number} timeout 超时时间
+   * @returns {Promise<Buffer>} 图片数据
+   */
+  function fetchImageBuffer(url, timeout) {
+    return new Promise((resolve, reject) => {
+      const req = request.get(url).set(getHeader()).buffer(true);
+
+      const timeoutId = setTimeout(() => {
+        req.abort();
+        reject(new Error(`Download timeout for ${url}`));
+      }, timeout);
+
+      req.on('aborted', () => {
+        clearTimeout(timeoutId);
+        reject(new Error('aborted'));
+      });
+
+      req.on('error', (err) => {
+        clearTimeout(timeoutId);
+        reject(err);
+      });
+
+      req.parse((res, callback) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => callback(null, Buffer.concat(chunks)));
+      }).end((err, res) => {
+        clearTimeout(timeoutId);
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(res.body);
+      });
+    });
+  }
+
+  /**
    * 单线程模式：下载图片
    * @param {Object} args 下载参数
    * @returns {Promise<Object>} 下载结果
    */
   async function saveImageSingleThread(args) {
     const savePath = path.normalize(args.savePath);
-    const sharpStream = sharp({
-      failOnError: false,
-    });
-    const promises = [];
+    const timeout = args.timeout || 30000;
 
-    return new Promise((resolve) => {
+    try {
+      const data = await fetchImageBuffer(args.url, timeout);
+      let operation = sharp(data, { failOnError: false });
       if (args.imageBuffer) {
         const base64Data = args.imageBuffer.replace(/^data:image\/\w+;base64,/, '');
         const dataBuffer = Buffer.from(base64Data, 'base64');
-        promises.push(
-          sharpStream
-            .composite([{ input: dataBuffer, gravity: 'centre', blend: 'dest-in' }])
-            .toFile(savePath),
-        );
-      } else {
-        promises.push(
-          sharpStream
-            .toFile(savePath),
-        );
+        operation = operation.composite([{ input: dataBuffer, gravity: 'centre', blend: 'dest-in' }]);
       }
-
-      const req = request.get(args.url).set(getHeader());
-      const stream = req.pipe(sharpStream);
-
-      // 处理请求中止事件
-      req.on('aborted', () => {
-        console.error('[IPC Main] 请求被中止');
-        try {
-          fs.unlinkSync(savePath);
-        } catch {
-          // do nothing
-        }
-        resolve({ success: false, error: 'aborted' });
-      });
-
-      stream.on('finish', () => {
-        Promise.all(promises)
-          .then(() => {
-            resolve({ success: true });
-          })
-          .catch((err) => {
-            console.error('[IPC Main] 保存图片错误', err);
-            try {
-              fs.unlinkSync(savePath);
-            } catch {
-              // do nothing
-            }
-            resolve({ success: false, error: err.message });
-          });
-      });
-
-      stream.on('error', (err) => {
-        console.error('[IPC Main] 下载流错误', err);
-        try {
-          fs.unlinkSync(savePath);
-        } catch {
-          // do nothing
-        }
-        req.abort();
-        resolve({ success: false, error: err.message });
-      });
-
-      req.on('error', (err) => {
-        console.error('[IPC Main] 请求错误', err);
-        try {
-          fs.unlinkSync(savePath);
-        } catch {
-          // do nothing
-        }
-        resolve({ success: false, error: err.message });
-      });
-    });
+      await operation.toFile(savePath);
+      return { success: true };
+    } catch (err) {
+      console.error('[IPC Main] 保存图片错误', err.message);
+      try {
+        fs.unlinkSync(savePath);
+      } catch {
+        // do nothing
+      }
+      return { success: false, error: err.message };
+    }
   }
 
   /**
@@ -302,32 +326,14 @@ export function ipcHandle(_win) {
       let imgBack;
       const imgBuffer = [];
       const layers = args.layers;
+      const timeout = args.timeout || 30000;
 
       for (let index = 0; index < layers.length; index++) {
         const item = layers[index];
-        const sharpStream = sharp({
-          failOnError: false,
-        });
 
         // 修复：使用 item.url 而不是 args.url
-        const bff = await new Promise((resolve, reject) => {
-          const req = request.get(item.url).set(getHeader());
-          const stream = req.pipe(sharpStream);
-
-          // 处理请求中止事件
-          req.on('aborted', () => {
-            reject(new Error('aborted'));
-          });
-
-          stream.on('finish', () => {
-            sharpStream.toBuffer()
-              .then(resolve)
-              .catch(reject);
-          });
-
-          stream.on('error', reject);
-          req.on('error', reject);
-        });
+        const data = await fetchImageBuffer(item.url, timeout);
+        const bff = await sharp(data, { failOnError: false }).toBuffer();
 
         if (item.isLabel) {
           imgBack = bff;
@@ -372,33 +378,12 @@ export function ipcHandle(_win) {
       try {
         const worker = await getDownloadWorker();
         if (worker) {
-          return new Promise((resolve) => {
-            // 生成自定义任务ID
-            const customTaskId = `save-image-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+          // 生成自定义任务ID
+          const customTaskId = `save-image-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-            // 设置任务完成回调
-            const originalOnComplete = worker.onTaskComplete;
-            worker.setOnTaskComplete((taskData, result) => {
-              if (taskData.customTaskId === customTaskId) {
-                worker.setOnTaskComplete(originalOnComplete);
-                resolve(result);
-              } else if (originalOnComplete) {
-                originalOnComplete(taskData, result);
-              }
-            });
-
-            // 设置任务错误回调
-            const originalOnError = worker.onTaskError;
-            worker.setOnTaskError((taskData, error) => {
-              if (taskData.customTaskId === customTaskId) {
-                worker.setOnTaskError(originalOnError);
-                resolve({ success: false, error: error.message || 'Unknown error' });
-              } else if (originalOnError) {
-                originalOnError(taskData, error);
-              }
-            });
-
-            // 添加任务
+          // 注册结果等待器：结果由 setupWorkerCallbacks 按 customTaskId 分发，避免并发任务互相覆盖回调
+          const promise = new Promise((resolve) => {
+            workerTaskResolvers.set(customTaskId, resolve);
             worker.addTask({
               customTaskId,
               url: args.url,
@@ -407,6 +392,17 @@ export function ipcHandle(_win) {
               imageBuffer: args.imageBuffer,
             });
           });
+
+          // 超时保护：防止回调丢失导致渲染进程永久等待
+          setTimeout(() => {
+            const resolve = workerTaskResolvers.get(customTaskId);
+            if (resolve) {
+              workerTaskResolvers.delete(customTaskId);
+              resolve({ success: false, error: 'Task timeout' });
+            }
+          }, 120000);
+
+          return promise;
         }
       } catch (error) {
         console.error('[IPC Main] Worker mode failed, falling back to single-thread:', error);
@@ -425,33 +421,12 @@ export function ipcHandle(_win) {
       try {
         const worker = await getDownloadWorker();
         if (worker) {
-          return new Promise((resolve) => {
-            // 生成自定义任务ID
-            const customTaskId = `save-image-merge-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+          // 生成自定义任务ID
+          const customTaskId = `save-image-merge-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-            // 设置任务完成回调
-            const originalOnComplete = worker.onTaskComplete;
-            worker.setOnTaskComplete((taskData, result) => {
-              if (taskData.customTaskId === customTaskId) {
-                worker.setOnTaskComplete(originalOnComplete);
-                resolve(result);
-              } else if (originalOnComplete) {
-                originalOnComplete(taskData, result);
-              }
-            });
-
-            // 设置任务错误回调
-            const originalOnError = worker.onTaskError;
-            worker.setOnTaskError((taskData, error) => {
-              if (taskData.customTaskId === customTaskId) {
-                worker.setOnTaskError(originalOnError);
-                resolve({ success: false, error: error.message || 'Unknown error' });
-              } else if (originalOnError) {
-                originalOnError(taskData, error);
-              }
-            });
-
-            // 添加任务
+          // 注册结果等待器：结果由 setupWorkerCallbacks 按 customTaskId 分发，避免并发任务互相覆盖回调
+          const promise = new Promise((resolve) => {
+            workerTaskResolvers.set(customTaskId, resolve);
             worker.addTask({
               customTaskId,
               layers: args.layers,
@@ -460,6 +435,18 @@ export function ipcHandle(_win) {
               imageBuffer: args.imageBuffer,
             });
           });
+
+          // 超时保护：防止回调丢失导致渲染进程永久等待
+          setTimeout(() => {
+            const resolve = workerTaskResolvers.get(customTaskId);
+            if (resolve) {
+              workerTaskResolvers.delete(customTaskId);
+              console.warn(`[IPC Main] save-image-merge timeout fallback triggered for ${customTaskId}, layers=${args.layers ? args.layers.length : 0}`);
+              resolve({ success: false, error: 'Task timeout' });
+            }
+          }, 120000);
+
+          return promise;
         }
       } catch (error) {
         console.error('[IPC Main] Worker mode failed, falling back to single-thread:', error);

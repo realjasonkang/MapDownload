@@ -34,12 +34,16 @@ export class DownloadQueue {
 
   /**
    * 添加任务到队列
+   * 若队列已启动且未暂停/取消，会继续处理新增任务
    * @param {Array} tasks 任务列表
    */
   add(tasks) {
     if (!Array.isArray(tasks)) return;
     this.queue.push(...tasks);
     this.statistics.total += tasks.length;
+    if (this._started && !this.paused && !this.cancelled) {
+      this._processNext();
+    }
   }
 
   /**
@@ -48,6 +52,7 @@ export class DownloadQueue {
   start() {
     this.cancelled = false;
     this.paused = false;
+    this._started = true;
     this._processNext();
   }
 
