@@ -110,7 +110,7 @@ The `DownloadQueue` explicitly cleans up task references after completion to pre
 
 ## Node/Electron Version Requirements
 
-- Node.js >= v16.13
+- Node.js >= 16.13.0 and < 19 (Node 19+ breaks the build; enforced via `engines` + `.npmrc` `engine-strict=true`)
 - npm >= v8.1
 - Electron 16.0.1
 

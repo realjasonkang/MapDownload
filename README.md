@@ -1,4 +1,4 @@
-[![Required Node.JS >= v16.13](https://img.shields.io/static/v1?label=node&message=%3E=16.13&logo=node.js&color)](https://nodejs.org/about/releases/)
+[![Required Node.JS >= v16.13 < v19](https://img.shields.io/static/v1?label=node&message=16.13%20~%2018&logo=node.js&color)](https://nodejs.org/about/releases/)
 [![Required npm >= v8.1](https://img.shields.io/static/v1?label=npm&message=%3E=8.1&logo=npm&color)](https://github.com/npm/cli/releases)
 # map-download
 
@@ -26,6 +26,7 @@
 ## Build Setup
 
 ``` bash
+# 需要 Node.js 16.13 ~ 18.x（Node 19+ 构建会报错，`.npmrc` 已开启 engine-strict 强制检查）
 # 安装依赖(依赖较大，使用国内镜像)
 npm install
 

@@ -110,7 +110,7 @@ npm run test
 ### 目标平台
 
 - 浏览器目标：Chrome 96
-- Node.js 版本：>= 16.13
+- Node.js 版本：>= 16.13.0 且 < 19（Node 19+ 构建会报错，由 `package.json` engines 和 `.npmrc` 的 `engine-strict=true` 强制）
 - npm 版本：>= 8.1
 
 ## 主要组件说明
