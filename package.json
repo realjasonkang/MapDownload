@@ -6,7 +6,7 @@
   "version": "v1.0.0",
   "private": true,
   "engines": {
-    "node": ">=16.13.0 <19",
+    "node": ">=v16.13",
     "npm": ">=8.1"
   },
   "main": "packages/main/dist/index.cjs",
